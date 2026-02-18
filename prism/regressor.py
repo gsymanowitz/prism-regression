@@ -642,76 +642,122 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         }
 
     def _step4_interactions(self, X, y, verbose):
-        """Test two-way interactions with BIC k×penalty."""
-        selected = self.step2_results_['selected_features']
-        transforms = self.step2_results_['transform_dict']
-        base_coefs = self.step3_results_['coefficients']
-        base_ints = self.step3_results_['intercepts']
+        """Test two-way interactions sequentially with BIC k×penalty.
+
+        Each interaction is tested against the base model residuals.
+        If it passes, it is added to the model with coordinate descent
+        refinement before the next interaction is tested.  This sequential
+        approach matches the paper methodology (Section 3.6-3.7).
+        """
+        selected = list(self.step2_results_['selected_features'])
+        transforms = dict(self.step2_results_['transform_dict'])
+        coefs = dict(self.step3_results_['coefficients'])
+        intercepts = dict(self.step3_results_['intercepts'])
 
         n = len(y)
-        preds_base = self._calc_preds(X, selected, transforms,
-                                      base_coefs, base_ints)
-        resid_base = y.values - preds_base
-        rss_base = np.sum(resid_base ** 2)
-        k_base = len(selected) * 2
-        bic_base = n * np.log(rss_base / n) + k_base * np.log(n)
+        y_arr = y.values
+
+        # Current model state (updated as interactions are added)
+        current_interactions = []
+
+        def _current_preds():
+            p = self._calc_preds(X, selected, transforms, coefs, intercepts)
+            for inter in current_interactions:
+                xj = apply_transform(X[inter['feature_j']].values,
+                                     transforms[inter['feature_j']])
+                xk = apply_transform(X[inter['feature_k']].values,
+                                     transforms[inter['feature_k']])
+                zt = apply_transform(xj * xk, inter['transform'])
+                p += inter['coefficient'] * zt + inter['intercept']
+            return p
+
+        def _current_k():
+            k = len(selected) + 1  # base: p slopes + 1 intercept
+            for inter in current_interactions:
+                k += self.interaction_penalty * 2
+            return k
 
         results = []
-        chosen = []
         tested = 0
 
+        # Generate all candidate pairs
+        candidates = []
         for i, fj in enumerate(selected):
             for fk in selected[i + 1:]:
-                tested += 1
-                xj = apply_transform(X[fj].values, transforms[fj])
-                xk = apply_transform(X[fk].values, transforms[fk])
-                z = xj * xk
+                candidates.append((fj, fk))
 
-                best_bic, best_tf, best_dbic = np.inf, None, 0
-                best_r2g, best_c, best_i = 0, None, None
+        for fj, fk in candidates:
+            tested += 1
 
-                for tf in TRANSFORM_TYPES:
-                    zt = apply_transform(z, tf).reshape(-1, 1)
-                    if np.std(zt) == 0:
-                        continue
-                    mdl = LinearRegression().fit(zt, resid_base)
-                    preds_new = preds_base + mdl.predict(zt).ravel()
-                    rss_new = np.sum((y.values - preds_new) ** 2)
-                    ss_tot = np.sum((y.values - y.mean()) ** 2)
-                    r2_new = 1.0 - rss_new / ss_tot
-                    r2_base = 1.0 - rss_base / ss_tot
-                    r2g = r2_new - r2_base
-                    k_new = k_base + self.interaction_penalty * 2
-                    bic_new = n * np.log(rss_new / n) + k_new * np.log(n)
-                    dbic = bic_base - bic_new
+            # Current model predictions and BIC
+            preds_cur = _current_preds()
+            resid_cur = y_arr - preds_cur
+            rss_cur = np.sum(resid_cur ** 2)
+            k_cur = _current_k()
+            bic_cur = n * np.log(rss_cur / n) + k_cur * np.log(n)
 
-                    if bic_new < best_bic:
-                        best_bic = bic_new
-                        best_tf = tf
-                        best_dbic = dbic
-                        best_r2g = r2g
-                        best_c = mdl.coef_[0]
-                        best_i = mdl.intercept_
+            # Create interaction term from transformed variables
+            xj = apply_transform(X[fj].values, transforms[fj])
+            xk = apply_transform(X[fk].values, transforms[fk])
+            z = xj * xk
 
-                results.append({
-                    'Interaction': f"{fj} × {fk}",
-                    'Transform': best_tf,
-                    'R2_gain': best_r2g,
-                    'Delta_BIC': best_dbic,
-                    'Selected': best_dbic > 0,
-                })
-                if best_dbic > 0:
-                    chosen.append({
-                        'feature_j': fj, 'feature_k': fk,
-                        'transform': best_tf,
-                        'coefficient': best_c, 'intercept': best_i,
-                        'r2_gain': best_r2g, 'delta_bic': best_dbic,
-                    })
+            best_bic, best_tf, best_dbic = np.inf, None, 0
+            best_r2g, best_c, best_i = 0, None, None
+
+            for tf in TRANSFORM_TYPES:
+                zt = apply_transform(z, tf).reshape(-1, 1)
+                if np.std(zt) == 0:
+                    continue
+                mdl = LinearRegression().fit(zt, resid_cur)
+                preds_new = preds_cur + mdl.predict(zt).ravel()
+                rss_new = np.sum((y_arr - preds_new) ** 2)
+                ss_tot = np.sum((y_arr - y_arr.mean()) ** 2)
+                r2_new = 1.0 - rss_new / ss_tot
+                r2_old = 1.0 - rss_cur / ss_tot
+                r2g = r2_new - r2_old
+                k_new = k_cur + self.interaction_penalty * 2
+                bic_new = n * np.log(rss_new / n) + k_new * np.log(n)
+                dbic = bic_cur - bic_new
+
+                if bic_new < best_bic:
+                    best_bic = bic_new
+                    best_tf = tf
+                    best_dbic = dbic
+                    best_r2g = r2g
+                    best_c = mdl.coef_[0]
+                    best_i = mdl.intercept_
+
+            passed = best_dbic > 0
+
+            results.append({
+                'Interaction': f"{fj} × {fk}",
+                'Transform': best_tf,
+                'R2_gain': best_r2g,
+                'Delta_BIC': best_dbic,
+                'Selected': passed,
+            })
+
+            if passed:
+                # Add interaction to model
+                inter_info = {
+                    'feature_j': fj, 'feature_k': fk,
+                    'transform': best_tf,
+                    'coefficient': best_c, 'intercept': best_i,
+                    'r2_gain': best_r2g, 'delta_bic': best_dbic,
+                }
+                current_interactions.append(inter_info)
+
+                # Run coordinate descent on entire model (base + interactions)
+                # to properly integrate the new interaction
+                self._coord_descent_with_interactions(
+                    X, y_arr, selected, transforms, coefs, intercepts,
+                    current_interactions, self.m,
+                )
 
         if verbose:
-            print(f"\n  Tested: {tested}   Selected: {len(chosen)}")
-            if chosen:
-                for c in chosen:
+            print(f"\n  Tested: {tested}   Selected: {len(current_interactions)}")
+            if current_interactions:
+                for c in current_interactions:
                     print(f"    {c['feature_j']} × {c['feature_k']} "
                           f"({c['transform']})  "
                           f"ΔR²={c['r2_gain']*100:.2f}%  "
@@ -722,7 +768,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
         return {
             'interactions_tested': tested,
-            'interactions_selected': chosen,
+            'interactions_selected': current_interactions,
             'interaction_results': pd.DataFrame(results),
         }
 
@@ -745,6 +791,62 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 mdl = LinearRegression().fit(xt, resid)
                 coefs[feat] = mdl.coef_[0]
                 intercepts[feat] = mdl.intercept_
+
+    def _coord_descent_with_interactions(self, X, y_arr, selected,
+                                          transforms, coefs, intercepts,
+                                          interactions, n_iters):
+        """Coordinate descent over base variables AND interaction terms."""
+        for _ in range(n_iters):
+            # Update base variable coefficients
+            for feat in selected:
+                preds_other = np.zeros(len(y_arr))
+                for other in selected:
+                    if other != feat:
+                        xt = apply_transform(X[other].values,
+                                             transforms[other])
+                        preds_other += coefs[other] * xt + intercepts[other]
+                for inter in interactions:
+                    xj = apply_transform(X[inter['feature_j']].values,
+                                         transforms[inter['feature_j']])
+                    xk = apply_transform(X[inter['feature_k']].values,
+                                         transforms[inter['feature_k']])
+                    zt = apply_transform(xj * xk, inter['transform'])
+                    preds_other += inter['coefficient'] * zt + inter['intercept']
+                resid = y_arr - preds_other
+                xt = apply_transform(X[feat].values,
+                                     transforms[feat]).reshape(-1, 1)
+                mdl = LinearRegression().fit(xt, resid)
+                coefs[feat] = mdl.coef_[0]
+                intercepts[feat] = mdl.intercept_
+
+            # Update interaction coefficients
+            for inter in interactions:
+                preds_other = np.zeros(len(y_arr))
+                for feat in selected:
+                    xt = apply_transform(X[feat].values, transforms[feat])
+                    preds_other += coefs[feat] * xt + intercepts[feat]
+                for other_inter in interactions:
+                    if other_inter is not inter:
+                        xj = apply_transform(
+                            X[other_inter['feature_j']].values,
+                            transforms[other_inter['feature_j']])
+                        xk = apply_transform(
+                            X[other_inter['feature_k']].values,
+                            transforms[other_inter['feature_k']])
+                        zt = apply_transform(xj * xk,
+                                             other_inter['transform'])
+                        preds_other += (other_inter['coefficient'] * zt
+                                        + other_inter['intercept'])
+                resid = y_arr - preds_other
+                xj = apply_transform(X[inter['feature_j']].values,
+                                     transforms[inter['feature_j']])
+                xk = apply_transform(X[inter['feature_k']].values,
+                                     transforms[inter['feature_k']])
+                zt = apply_transform(xj * xk,
+                                     inter['transform']).reshape(-1, 1)
+                mdl = LinearRegression().fit(zt, resid)
+                inter['coefficient'] = mdl.coef_[0]
+                inter['intercept'] = mdl.intercept_
 
     @staticmethod
     def _calc_preds(X, selected, transforms, coefs, intercepts):
@@ -777,14 +879,58 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         selected = self.step2_results_['selected_features']
         transforms = self.step2_results_['transform_dict']
 
+        # Start from step3 converged coefficients
+        coefs = dict(self.step3_results_['coefficients'])
+        intercepts = dict(self.step3_results_['intercepts'])
+
         self.selected_features_ = list(selected)
         self.transform_dict_ = dict(transforms)
-        self.coefficients_ = dict(self.step3_results_['coefficients'])
-        self.intercepts_ = dict(self.step3_results_['intercepts'])
         self.interactions_ = (
             self.step4_results_['interactions_selected']
             if include_interactions else []
         )
+
+        # If interactions were added, run final convergence on full model
+        if self.interactions_:
+            self._coord_descent_with_interactions(
+                X, y.values, selected, transforms, coefs, intercepts,
+                self.interactions_, self.m * 2,
+            )
+            # Converge until stable
+            ss_tot = np.sum((y.values - y.mean()) ** 2)
+            for _ in range(self.max_iterations):
+                preds_before = self._calc_preds(
+                    X, selected, transforms, coefs, intercepts)
+                for inter in self.interactions_:
+                    xj = apply_transform(X[inter['feature_j']].values,
+                                         transforms[inter['feature_j']])
+                    xk = apply_transform(X[inter['feature_k']].values,
+                                         transforms[inter['feature_k']])
+                    zt = apply_transform(xj * xk, inter['transform'])
+                    preds_before += inter['coefficient'] * zt + inter['intercept']
+                r2_before = 1.0 - np.sum((y.values - preds_before) ** 2) / ss_tot
+
+                self._coord_descent_with_interactions(
+                    X, y.values, selected, transforms, coefs, intercepts,
+                    self.interactions_, 1,
+                )
+
+                preds_after = self._calc_preds(
+                    X, selected, transforms, coefs, intercepts)
+                for inter in self.interactions_:
+                    xj = apply_transform(X[inter['feature_j']].values,
+                                         transforms[inter['feature_j']])
+                    xk = apply_transform(X[inter['feature_k']].values,
+                                         transforms[inter['feature_k']])
+                    zt = apply_transform(xj * xk, inter['transform'])
+                    preds_after += inter['coefficient'] * zt + inter['intercept']
+                r2_after = 1.0 - np.sum((y.values - preds_after) ** 2) / ss_tot
+
+                if abs(r2_after - r2_before) < self.convergence_tolerance:
+                    break
+
+        self.coefficients_ = coefs
+        self.intercepts_ = intercepts
         self.n_selected_ = len(selected)
         self.mr_ = self.step3_results_['mr']
 
