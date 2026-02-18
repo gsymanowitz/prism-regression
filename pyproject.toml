@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "prism-regression"
+version = "0.1.0"
+description = "PRISM: Progressive Refinement with Interpretable Sequential Modeling - automatic transformation discovery with exact sequential variance decomposition"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Gavin Symanowitz", email = ""},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+keywords = [
+    "regression", "interpretable-ml", "transformation-discovery",
+    "variance-decomposition", "statistics",
+]
+dependencies = [
+    "numpy>=1.20",
+    "pandas>=1.3",
+    "scikit-learn>=1.0",
+    "scipy>=1.7",
+    "matplotlib>=3.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/prism-regression"
+Documentation = "https://github.com/YOUR_USERNAME/prism-regression#readme"
+Repository = "https://github.com/YOUR_USERNAME/prism-regression"
+Issues = "https://github.com/YOUR_USERNAME/prism-regression/issues"
+
+[tool.setuptools.packages.find]
+include = ["prism*"]
