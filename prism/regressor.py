@@ -648,6 +648,9 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         If it passes, it is added to the model with coordinate descent
         refinement before the next interaction is tested.  This sequential
         approach matches the paper methodology (Section 3.6-3.7).
+
+        Interaction terms use RAW (untransformed) variable products;
+        transformations are then applied to the product itself.
         """
         selected = list(self.step2_results_['selected_features'])
         transforms = dict(self.step2_results_['transform_dict'])
@@ -656,6 +659,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
         n = len(y)
         y_arr = y.values
+        ss_tot = np.sum((y_arr - y_arr.mean()) ** 2)
 
         # Current model state (updated as interactions are added)
         current_interactions = []
@@ -663,19 +667,11 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         def _current_preds():
             p = self._calc_preds(X, selected, transforms, coefs, intercepts)
             for inter in current_interactions:
-                xj = apply_transform(X[inter['feature_j']].values,
-                                     transforms[inter['feature_j']])
-                xk = apply_transform(X[inter['feature_k']].values,
-                                     transforms[inter['feature_k']])
-                zt = apply_transform(xj * xk, inter['transform'])
+                # Interactions use RAW variable products
+                z_raw = X[inter['feature_j']].values * X[inter['feature_k']].values
+                zt = apply_transform(z_raw, inter['transform'])
                 p += inter['coefficient'] * zt + inter['intercept']
             return p
-
-        def _current_k():
-            k = len(selected) + 1  # base: p slopes + 1 intercept
-            for inter in current_interactions:
-                k += self.interaction_penalty * 2
-            return k
 
         results = []
         tested = 0
@@ -686,37 +682,44 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             for fk in selected[i + 1:]:
                 candidates.append((fj, fk))
 
+        # Base BIC: k_base = number of selected variables, penalty = k_base * 5
+        k_base = len(selected)
+        preds_base = _current_preds()
+        rss_base = np.sum((y_arr - preds_base) ** 2)
+        bic_base = n * np.log(rss_base / n) + k_base * np.log(n)
+
         for fj, fk in candidates:
             tested += 1
 
-            # Current model predictions and BIC
+            # Current model predictions and residuals
             preds_cur = _current_preds()
             resid_cur = y_arr - preds_cur
             rss_cur = np.sum(resid_cur ** 2)
-            k_cur = _current_k()
-            bic_cur = n * np.log(rss_cur / n) + k_cur * np.log(n)
+            r2_cur = 1.0 - rss_cur / ss_tot
 
-            # Create interaction term from transformed variables
-            xj = apply_transform(X[fj].values, transforms[fj])
-            xk = apply_transform(X[fk].values, transforms[fk])
-            z = xj * xk
+            # BIC of current model (base + any already-added interactions)
+            k_cur = k_base + len(current_interactions)
+            bic_cur = n * np.log(rss_cur / n) + (k_cur * self.interaction_penalty) * np.log(n)
+
+            # Create interaction term from RAW (untransformed) variables
+            z_raw = X[fj].values * X[fk].values
 
             best_bic, best_tf, best_dbic = np.inf, None, 0
             best_r2g, best_c, best_i = 0, None, None
 
             for tf in TRANSFORM_TYPES:
-                zt = apply_transform(z, tf).reshape(-1, 1)
+                zt = apply_transform(z_raw, tf).reshape(-1, 1)
                 if np.std(zt) == 0:
                     continue
                 mdl = LinearRegression().fit(zt, resid_cur)
                 preds_new = preds_cur + mdl.predict(zt).ravel()
                 rss_new = np.sum((y_arr - preds_new) ** 2)
-                ss_tot = np.sum((y_arr - y_arr.mean()) ** 2)
                 r2_new = 1.0 - rss_new / ss_tot
-                r2_old = 1.0 - rss_cur / ss_tot
-                r2g = r2_new - r2_old
-                k_new = k_cur + self.interaction_penalty * 2
-                bic_new = n * np.log(rss_new / n) + k_new * np.log(n)
+                r2g = r2_new - r2_cur
+
+                # BIC with k×5 penalty: (k_cur + 1) * 5
+                k_new = k_cur + 1
+                bic_new = n * np.log(rss_new / n) + (k_new * self.interaction_penalty) * np.log(n)
                 dbic = bic_cur - bic_new
 
                 if bic_new < best_bic:
@@ -795,7 +798,8 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
     def _coord_descent_with_interactions(self, X, y_arr, selected,
                                           transforms, coefs, intercepts,
                                           interactions, n_iters):
-        """Coordinate descent over base variables AND interaction terms."""
+        """Coordinate descent over base variables AND interaction terms.
+        Interaction terms use RAW variable products (matching paper)."""
         for _ in range(n_iters):
             # Update base variable coefficients
             for feat in selected:
@@ -806,11 +810,9 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                                              transforms[other])
                         preds_other += coefs[other] * xt + intercepts[other]
                 for inter in interactions:
-                    xj = apply_transform(X[inter['feature_j']].values,
-                                         transforms[inter['feature_j']])
-                    xk = apply_transform(X[inter['feature_k']].values,
-                                         transforms[inter['feature_k']])
-                    zt = apply_transform(xj * xk, inter['transform'])
+                    z_raw = (X[inter['feature_j']].values
+                             * X[inter['feature_k']].values)
+                    zt = apply_transform(z_raw, inter['transform'])
                     preds_other += inter['coefficient'] * zt + inter['intercept']
                 resid = y_arr - preds_other
                 xt = apply_transform(X[feat].values,
@@ -827,22 +829,15 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                     preds_other += coefs[feat] * xt + intercepts[feat]
                 for other_inter in interactions:
                     if other_inter is not inter:
-                        xj = apply_transform(
-                            X[other_inter['feature_j']].values,
-                            transforms[other_inter['feature_j']])
-                        xk = apply_transform(
-                            X[other_inter['feature_k']].values,
-                            transforms[other_inter['feature_k']])
-                        zt = apply_transform(xj * xk,
-                                             other_inter['transform'])
+                        z_raw = (X[other_inter['feature_j']].values
+                                 * X[other_inter['feature_k']].values)
+                        zt = apply_transform(z_raw, other_inter['transform'])
                         preds_other += (other_inter['coefficient'] * zt
                                         + other_inter['intercept'])
                 resid = y_arr - preds_other
-                xj = apply_transform(X[inter['feature_j']].values,
-                                     transforms[inter['feature_j']])
-                xk = apply_transform(X[inter['feature_k']].values,
-                                     transforms[inter['feature_k']])
-                zt = apply_transform(xj * xk,
+                z_raw = (X[inter['feature_j']].values
+                         * X[inter['feature_k']].values)
+                zt = apply_transform(z_raw,
                                      inter['transform']).reshape(-1, 1)
                 mdl = LinearRegression().fit(zt, resid)
                 inter['coefficient'] = mdl.coef_[0]
@@ -863,15 +858,10 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         )
         if self.interactions_:
             for inter in self.interactions_:
-                xj = apply_transform(
-                    X[inter['feature_j']].values,
-                    self.transform_dict_[inter['feature_j']],
-                )
-                xk = apply_transform(
-                    X[inter['feature_k']].values,
-                    self.transform_dict_[inter['feature_k']],
-                )
-                z = apply_transform(xj * xk, inter['transform'])
+                # Interactions use RAW variable products (matching paper)
+                z_raw = (X[inter['feature_j']].values
+                         * X[inter['feature_k']].values)
+                z = apply_transform(z_raw, inter['transform'])
                 preds += inter['coefficient'] * z + inter['intercept']
         return preds
 
@@ -902,11 +892,9 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 preds_before = self._calc_preds(
                     X, selected, transforms, coefs, intercepts)
                 for inter in self.interactions_:
-                    xj = apply_transform(X[inter['feature_j']].values,
-                                         transforms[inter['feature_j']])
-                    xk = apply_transform(X[inter['feature_k']].values,
-                                         transforms[inter['feature_k']])
-                    zt = apply_transform(xj * xk, inter['transform'])
+                    z_raw = (X[inter['feature_j']].values
+                             * X[inter['feature_k']].values)
+                    zt = apply_transform(z_raw, inter['transform'])
                     preds_before += inter['coefficient'] * zt + inter['intercept']
                 r2_before = 1.0 - np.sum((y.values - preds_before) ** 2) / ss_tot
 
@@ -918,11 +906,9 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 preds_after = self._calc_preds(
                     X, selected, transforms, coefs, intercepts)
                 for inter in self.interactions_:
-                    xj = apply_transform(X[inter['feature_j']].values,
-                                         transforms[inter['feature_j']])
-                    xk = apply_transform(X[inter['feature_k']].values,
-                                         transforms[inter['feature_k']])
-                    zt = apply_transform(xj * xk, inter['transform'])
+                    z_raw = (X[inter['feature_j']].values
+                             * X[inter['feature_k']].values)
+                    zt = apply_transform(z_raw, inter['transform'])
                     preds_after += inter['coefficient'] * zt + inter['intercept']
                 r2_after = 1.0 - np.sum((y.values - preds_after) ** 2) / ss_tot
 
