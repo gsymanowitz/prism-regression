@@ -27,7 +27,7 @@ pip install prism-regression
 Or install from source:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/prism-regression.git
+git clone https://github.com/gsymanowitz/prism-regression.git
 cd prism-regression
 pip install -e .
 ```
