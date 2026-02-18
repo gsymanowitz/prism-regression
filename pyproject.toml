@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [
-    {name = "Gavin Symanowitz", email = ""},
+    {name = "Gavin Symanowitz", email = "gsymanowitz@gmail.com"},
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -38,10 +38,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/prism-regression"
-Documentation = "https://github.com/YOUR_USERNAME/prism-regression#readme"
-Repository = "https://github.com/YOUR_USERNAME/prism-regression"
-Issues = "https://github.com/YOUR_USERNAME/prism-regression/issues"
+Homepage = "https://github.com/gsymanowitz/prism-regression"
+Documentation = "https://github.com/gsymanowitz/prism-regression#readme"
+Repository = "https://github.com/gsymanowitz/prism-regression"
+Issues = "https://github.com/gsymanowitz/prism-regression/issues"
 
 [tool.setuptools.packages.find]
 include = ["prism*"]
