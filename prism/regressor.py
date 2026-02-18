@@ -642,15 +642,16 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         }
 
     def _step4_interactions(self, X, y, verbose):
-        """Test two-way interactions sequentially with BIC k×penalty.
+        """Greedy sequential interaction testing with BIC k×penalty.
 
-        Each interaction is tested against the base model residuals.
-        If it passes, it is added to the model with coordinate descent
-        refinement before the next interaction is tested.  This sequential
-        approach matches the paper methodology (Section 3.6-3.7).
-
-        Interaction terms use RAW (untransformed) variable products;
-        transformations are then applied to the product itself.
+        Procedure (mirrors Phase 1 forward selection logic):
+        1. Screen all p(p-1)/2 interactions against base residuals
+           using RAW variable products with 7 transformations each.
+        2. Rank by ΔBIC (best first).
+        3. Add the top-ranked interaction if ΔBIC > 0, then run
+           coordinate descent on the full model (base + interaction).
+        4. Re-evaluate the next candidate against UPDATED residuals.
+        5. Stop at the first candidate that fails the BIC test.
         """
         selected = list(self.step2_results_['selected_features'])
         transforms = dict(self.step2_results_['transform_dict'])
@@ -661,47 +662,88 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         y_arr = y.values
         ss_tot = np.sum((y_arr - y_arr.mean()) ** 2)
 
-        # Current model state (updated as interactions are added)
-        current_interactions = []
-
-        def _current_preds():
-            p = self._calc_preds(X, selected, transforms, coefs, intercepts)
-            for inter in current_interactions:
-                # Interactions use RAW variable products
-                z_raw = X[inter['feature_j']].values * X[inter['feature_k']].values
-                zt = apply_transform(z_raw, inter['transform'])
-                p += inter['coefficient'] * zt + inter['intercept']
-            return p
-
-        results = []
-        tested = 0
-
-        # Generate all candidate pairs
-        candidates = []
-        for i, fj in enumerate(selected):
-            for fk in selected[i + 1:]:
-                candidates.append((fj, fk))
-
-        # Base BIC: k_base = number of selected variables, penalty = k_base * 5
+        # --- Phase A: Screen all interactions against base residuals -------
+        preds_base = self._calc_preds(X, selected, transforms,
+                                      coefs, intercepts)
+        resid_base = y_arr - preds_base
+        rss_base = np.sum(resid_base ** 2)
+        r2_base = 1.0 - rss_base / ss_tot
         k_base = len(selected)
-        preds_base = _current_preds()
-        rss_base = np.sum((y_arr - preds_base) ** 2)
         bic_base = n * np.log(rss_base / n) + k_base * np.log(n)
 
-        for fj, fk in candidates:
-            tested += 1
+        screening = []
+        tested = 0
 
-            # Current model predictions and residuals
-            preds_cur = _current_preds()
+        for i, fj in enumerate(selected):
+            for fk in selected[i + 1:]:
+                tested += 1
+                z_raw = X[fj].values * X[fk].values
+
+                best_bic, best_tf, best_dbic = np.inf, None, 0
+                best_r2g, best_c, best_i = 0, None, None
+
+                for tf in TRANSFORM_TYPES:
+                    zt = apply_transform(z_raw, tf).reshape(-1, 1)
+                    if np.std(zt) == 0:
+                        continue
+                    mdl = LinearRegression().fit(zt, resid_base)
+                    preds_new = preds_base + mdl.predict(zt).ravel()
+                    rss_new = np.sum((y_arr - preds_new) ** 2)
+                    r2_new = 1.0 - rss_new / ss_tot
+                    r2g = r2_new - r2_base
+
+                    k_new = k_base + 1
+                    bic_new = (n * np.log(rss_new / n)
+                               + (k_new * self.interaction_penalty)
+                               * np.log(n))
+                    dbic = bic_base - bic_new
+
+                    if bic_new < best_bic:
+                        best_bic = bic_new
+                        best_tf = tf
+                        best_dbic = dbic
+                        best_r2g = r2g
+                        best_c = mdl.coef_[0]
+                        best_i = mdl.intercept_
+
+                screening.append({
+                    'feature_j': fj, 'feature_k': fk,
+                    'transform': best_tf,
+                    'coefficient': best_c, 'intercept': best_i,
+                    'r2_gain': best_r2g, 'delta_bic': best_dbic,
+                })
+
+        # Rank by ΔBIC (largest improvement first)
+        screening.sort(key=lambda x: x['delta_bic'], reverse=True)
+
+        # --- Phase B: Greedy sequential addition --------------------------
+        chosen = []
+        current_interactions = []
+
+        for candidate in screening:
+            if candidate['delta_bic'] <= 0:
+                break  # Remaining candidates are even worse
+
+            fj = candidate['feature_j']
+            fk = candidate['feature_k']
+
+            # Current model predictions (base + already-added interactions)
+            preds_cur = self._calc_preds(X, selected, transforms,
+                                         coefs, intercepts)
+            for inter in current_interactions:
+                z_raw = (X[inter['feature_j']].values
+                         * X[inter['feature_k']].values)
+                zt = apply_transform(z_raw, inter['transform'])
+                preds_cur += inter['coefficient'] * zt + inter['intercept']
+
             resid_cur = y_arr - preds_cur
             rss_cur = np.sum(resid_cur ** 2)
             r2_cur = 1.0 - rss_cur / ss_tot
-
-            # BIC of current model (base + any already-added interactions)
             k_cur = k_base + len(current_interactions)
-            bic_cur = n * np.log(rss_cur / n) + (k_cur * self.interaction_penalty) * np.log(n)
+            bic_cur = (n * np.log(rss_cur / n)
+                       + (k_cur * self.interaction_penalty) * np.log(n))
 
-            # Create interaction term from RAW (untransformed) variables
+            # Re-test this candidate against current residuals
             z_raw = X[fj].values * X[fk].values
 
             best_bic, best_tf, best_dbic = np.inf, None, 0
@@ -717,9 +759,10 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 r2_new = 1.0 - rss_new / ss_tot
                 r2g = r2_new - r2_cur
 
-                # BIC with k×5 penalty: (k_cur + 1) * 5
                 k_new = k_cur + 1
-                bic_new = n * np.log(rss_new / n) + (k_new * self.interaction_penalty) * np.log(n)
+                bic_new = (n * np.log(rss_new / n)
+                           + (k_new * self.interaction_penalty)
+                           * np.log(n))
                 dbic = bic_cur - bic_new
 
                 if bic_new < best_bic:
@@ -730,37 +773,43 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                     best_c = mdl.coef_[0]
                     best_i = mdl.intercept_
 
-            passed = best_dbic > 0
+            if best_dbic <= 0:
+                break  # First failure → stop
 
+            # Add this interaction
+            inter_info = {
+                'feature_j': fj, 'feature_k': fk,
+                'transform': best_tf,
+                'coefficient': best_c, 'intercept': best_i,
+                'r2_gain': best_r2g, 'delta_bic': best_dbic,
+            }
+            current_interactions.append(inter_info)
+            chosen.append(inter_info)
+
+            # Coordinate descent on full model (base + all interactions)
+            self._coord_descent_with_interactions(
+                X, y_arr, selected, transforms, coefs, intercepts,
+                current_interactions, self.m,
+            )
+
+        # Build results table for reporting
+        results = []
+        for s in screening:
             results.append({
-                'Interaction': f"{fj} × {fk}",
-                'Transform': best_tf,
-                'R2_gain': best_r2g,
-                'Delta_BIC': best_dbic,
-                'Selected': passed,
+                'Interaction': f"{s['feature_j']} × {s['feature_k']}",
+                'Transform': s['transform'],
+                'R2_gain': s['r2_gain'],
+                'Delta_BIC': s['delta_bic'],
+                'Selected': any(
+                    c['feature_j'] == s['feature_j']
+                    and c['feature_k'] == s['feature_k']
+                    for c in chosen),
             })
 
-            if passed:
-                # Add interaction to model
-                inter_info = {
-                    'feature_j': fj, 'feature_k': fk,
-                    'transform': best_tf,
-                    'coefficient': best_c, 'intercept': best_i,
-                    'r2_gain': best_r2g, 'delta_bic': best_dbic,
-                }
-                current_interactions.append(inter_info)
-
-                # Run coordinate descent on entire model (base + interactions)
-                # to properly integrate the new interaction
-                self._coord_descent_with_interactions(
-                    X, y_arr, selected, transforms, coefs, intercepts,
-                    current_interactions, self.m,
-                )
-
         if verbose:
-            print(f"\n  Tested: {tested}   Selected: {len(current_interactions)}")
-            if current_interactions:
-                for c in current_interactions:
+            print(f"\n  Tested: {tested}   Selected: {len(chosen)}")
+            if chosen:
+                for c in chosen:
                     print(f"    {c['feature_j']} × {c['feature_k']} "
                           f"({c['transform']})  "
                           f"ΔR²={c['r2_gain']*100:.2f}%  "
@@ -771,7 +820,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
         return {
             'interactions_tested': tested,
-            'interactions_selected': current_interactions,
+            'interactions_selected': chosen,
             'interaction_results': pd.DataFrame(results),
         }
 
