@@ -404,8 +404,12 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
     def plot_results(self, X, y, figsize=(15, 10)):
         """
-        Create diagnostic plots: one subplot per selected variable
-        (scatter + fitted curve) plus a predicted-vs-actual plot.
+        Create diagnostic plots: partial residual plots for each selected
+        variable plus a predicted-vs-actual plot.
+
+        Partial residuals for variable j:
+            e_j = y - ŷ_{-j}  (prediction from all OTHER variables)
+        Plotted against x_j with the fitted component overlaid.
         """
         self._check_fitted()
         X = self._coerce_X(X)
@@ -419,32 +423,44 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
         axes = axes.flatten()
 
+        # Full prediction for computing partial residuals
+        y_pred_full = self._predict_internal(X)
+
         for idx, feat in enumerate(feats):
             ax = axes[idx]
             xv = X[feat].values
             xt = apply_transform(xv, self.transform_dict_[feat])
             coef = self.coefficients_[feat]
             intc = self.intercepts_[feat]
-            y_fit = coef * xt + intc
+            component_j = coef * xt + intc
+
+            # Partial residual: y minus prediction from all OTHER variables
+            partial_resid = y - (y_pred_full - component_j)
 
             order = np.argsort(xv)
-            ax.scatter(xv, y, alpha=0.25, s=8)
-            ax.plot(xv[order], y_fit[order], 'r-', lw=2)
-            ax.set_title(f"{feat} ({self.transform_dict_[feat]})")
+            ax.scatter(xv, partial_resid, alpha=0.15, s=6,
+                       color='steelblue', label='Partial residuals')
+            ax.plot(xv[order], component_j[order], 'r-', lw=2,
+                    label=f'{self.transform_dict_[feat]}')
+            r2_contrib = (self.incremental_r2_[idx] * 100
+                          if idx < len(self.incremental_r2_) else 0)
+            ax.set_title(f"{feat} ({self.transform_dict_[feat]}, "
+                         f"ΔR²={r2_contrib:.1f}%)")
             ax.set_xlabel(feat)
-            ax.set_ylabel("y")
+            ax.set_ylabel("Partial residual")
+            ax.legend(fontsize=8, loc='best')
             ax.grid(True, alpha=0.3)
 
         # Predicted vs actual
         ax = axes[len(feats)]
-        y_pred = self._predict_internal(X)
-        ax.scatter(y, y_pred, alpha=0.25, s=8)
-        lo = min(y.min(), y_pred.min())
-        hi = max(y.max(), y_pred.max())
-        ax.plot([lo, hi], [lo, hi], 'r--', lw=2)
-        ax.set_xlabel("Actual")
-        ax.set_ylabel("Predicted")
+        ax.scatter(y, y_pred_full, alpha=0.15, s=6, color='steelblue')
+        lo = min(y.min(), y_pred_full.min())
+        hi = max(y.max(), y_pred_full.max())
+        ax.plot([lo, hi], [lo, hi], 'r--', lw=2, label='Perfect fit')
+        ax.set_xlabel("Actual y")
+        ax.set_ylabel("Predicted y")
         ax.set_title(f"Predicted vs Actual (R²={self.r2_:.4f})")
+        ax.legend(fontsize=8, loc='best')
         ax.grid(True, alpha=0.3)
 
         for idx in range(len(feats) + 1, len(axes)):
@@ -556,8 +572,8 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             )
             if best_f < f_crit:
                 if verbose:
-                    print(f"  Round {rnd}: {best_feat} ({best_tf})  "
-                          f"F={best_f:.1f} < {f_crit:.1f} -> STOP")
+                    print(f"  Round {rnd}: {best_feat:20s} ({best_tf:12s})  "
+                          f"F={best_f:.1f} < {f_crit:.1f}  Reject -> STOP")
                 break
 
             # Add winning variable
@@ -592,7 +608,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             if verbose:
                 print(f"  Round {rnd}: {best_feat:20s} ({best_tf:12s})  "
                       f"ΔR²={r2_gain*100:6.2f}%  "
-                      f"Cum={new_r2*100:6.2f}%  F={best_f:.0f}")
+                      f"Cum={new_r2*100:6.2f}%  F={best_f:.0f}  Add")
 
         step2_r2 = new_r2 if selected else 0.0
 
@@ -1119,14 +1135,44 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         print("FINAL MODEL SUMMARY")
         print("=" * 70)
 
-        print("\nVariance Attribution:")
+        # Variance attribution sorted by contribution (descending)
+        print("\nVariance Attribution (sorted by contribution):")
         print("-" * 70)
         df = self._attribution_df.copy()
-        df['Incr %'] = df['Incremental_R2'].apply(lambda v: f"{v*100:.2f}%")
-        df['Cum %'] = df['Cumulative_R2'].apply(lambda v: f"{v*100:.2f}%")
-        for _, row in df.iterrows():
+        # Separate MR row from variable rows
+        mr_rows = df[df['Variable'] == 'Multivariate Refinement']
+        var_rows = df[df['Variable'] != 'Multivariate Refinement']
+        var_rows = var_rows.sort_values('Incremental_R2', ascending=False)
+
+        for _, row in var_rows.iterrows():
             print(f"  {row['Variable']:30s}  {row['Transform']:14s}  "
-                  f"{row['Incr %']:>8s}  {row['Cum %']:>8s}")
+                  f"{row['Incremental_R2']*100:>8.2f}%")
+        for _, row in mr_rows.iterrows():
+            print(f"  {row['Variable']:30s}  {row['Transform']:14s}  "
+                  f"{row['Incremental_R2']*100:>8.4f}%")
+
+        # Final model parameters and functional forms
+        print(f"\nFinal Model Parameters:")
+        print("-" * 70)
+        total_intercept = sum(self.intercepts_[f]
+                              for f in self.selected_features_)
+        print(f"  {'Variable':20s}  {'Transform':14s}  {'Coefficient':>12s}  "
+              f"{'Intercept':>12s}")
+        for feat in self.selected_features_:
+            tf = self.transform_dict_[feat]
+            coef = self.coefficients_[feat]
+            intc = self.intercepts_[feat]
+            print(f"  {feat:20s}  {tf:14s}  {coef:>12.6f}  {intc:>12.6f}")
+        if self.interactions_:
+            for inter in self.interactions_:
+                label = f"{inter['feature_j']}×{inter['feature_k']}"
+                print(f"  {label:20s}  {inter['transform']:14s}  "
+                      f"{inter['coefficient']:>12.6f}  "
+                      f"{inter['intercept']:>12.6f}")
+                total_intercept += inter['intercept']
+        print(f"  {'':20s}  {'':14s}  {'':>12s}  {'----------':>12s}")
+        print(f"  {'Global intercept':20s}  {'(sum of αᵢ)':14s}  "
+              f"{'':>12s}  {total_intercept:>12.6f}")
 
         print(f"\nModel Comparison:")
         print(f"  OLS R² (linear only)   : {self._ols_r2*100:.2f}%")
