@@ -518,7 +518,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 ss_tot = np.sum((y.values - y.mean()) ** 2)
                 current_r2 = 1.0 - ss_res / ss_tot
             else:
-                residuals = y.values - y.mean()
+                residuals = y.values
                 current_r2 = 0.0
 
             r2_before = current_r2
