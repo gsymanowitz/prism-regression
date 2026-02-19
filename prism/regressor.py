@@ -239,6 +239,12 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         Significance level for the F-test stopping rule.
     interaction_penalty : float, default=5.0
         BIC complexity multiplier for interaction terms (k x penalty).
+    interaction_recompete : bool, default=True
+        If True, re-evaluate all remaining interaction candidates after
+        each addition (optimal but slower, O(p⁴) worst case).  If False,
+        walk down the initial screening ranking and re-test each against
+        updated residuals (faster, O(p²) worst case).  Set to False for
+        large p where interaction testing is computationally expensive.
     max_iterations : int, default=100
         Maximum iterations in Step 3 (final convergence).
     convergence_tolerance : float, default=1e-8
@@ -250,12 +256,14 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         m=10,
         alpha=0.05,
         interaction_penalty=5.0,
+        interaction_recompete=True,
         max_iterations=100,
         convergence_tolerance=1e-8,
     ):
         self.m = m
         self.alpha = alpha
         self.interaction_penalty = interaction_penalty
+        self.interaction_recompete = interaction_recompete
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
 
@@ -731,81 +739,158 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         # Rank by ΔBIC (largest improvement first)
         screening.sort(key=lambda x: x['delta_bic'], reverse=True)
 
-        # --- Phase B: Greedy sequential addition --------------------------
+        # --- Phase B: Greedy sequential addition ----------------------------
+        # Two modes controlled by interaction_recompete:
+        #   True  = full re-competition (re-evaluate all remaining after each
+        #           addition; optimal but O(p⁴) worst case)
+        #   False = fixed-rank (walk down screening list, re-test each against
+        #           updated residuals; faster, O(p²) worst case)
         chosen = []
         current_interactions = []
 
-        for candidate in screening:
-            if candidate['delta_bic'] <= 0:
-                break  # Remaining candidates are even worse
+        if self.interaction_recompete:
+            # --- Full re-competition mode ---
+            remaining = [(s['feature_j'], s['feature_k'])
+                         for s in screening if s['delta_bic'] > 0]
 
-            fj = candidate['feature_j']
-            fk = candidate['feature_k']
+            while remaining:
+                preds_cur = self._calc_preds(X, selected, transforms,
+                                             coefs, intercepts)
+                for inter in current_interactions:
+                    z_raw = (X[inter['feature_j']].values
+                             * X[inter['feature_k']].values)
+                    zt = apply_transform(z_raw, inter['transform'])
+                    preds_cur += (inter['coefficient'] * zt
+                                  + inter['intercept'])
 
-            # Current model predictions (base + already-added interactions)
-            preds_cur = self._calc_preds(X, selected, transforms,
-                                         coefs, intercepts)
-            for inter in current_interactions:
-                z_raw = (X[inter['feature_j']].values
-                         * X[inter['feature_k']].values)
-                zt = apply_transform(z_raw, inter['transform'])
-                preds_cur += inter['coefficient'] * zt + inter['intercept']
-
-            resid_cur = y_arr - preds_cur
-            rss_cur = np.sum(resid_cur ** 2)
-            r2_cur = 1.0 - rss_cur / ss_tot
-            k_cur = k_base + len(current_interactions)
-            bic_cur = (n * np.log(rss_cur / n)
-                       + (k_cur * self.interaction_penalty) * np.log(n))
-
-            # Re-test this candidate against current residuals
-            z_raw = X[fj].values * X[fk].values
-
-            best_bic, best_tf, best_dbic = np.inf, None, 0
-            best_r2g, best_c, best_i = 0, None, None
-
-            for tf in TRANSFORM_TYPES:
-                zt = apply_transform(z_raw, tf).reshape(-1, 1)
-                if np.std(zt) == 0:
-                    continue
-                mdl = LinearRegression().fit(zt, resid_cur)
-                preds_new = preds_cur + mdl.predict(zt).ravel()
-                rss_new = np.sum((y_arr - preds_new) ** 2)
-                r2_new = 1.0 - rss_new / ss_tot
-                r2g = r2_new - r2_cur
-
-                k_new = k_cur + 1
-                bic_new = (n * np.log(rss_new / n)
-                           + (k_new * self.interaction_penalty)
+                resid_cur = y_arr - preds_cur
+                rss_cur = np.sum(resid_cur ** 2)
+                r2_cur = 1.0 - rss_cur / ss_tot
+                k_cur = k_base + len(current_interactions)
+                bic_cur = (n * np.log(rss_cur / n)
+                           + (k_cur * self.interaction_penalty)
                            * np.log(n))
-                dbic = bic_cur - bic_new
 
-                if bic_new < best_bic:
-                    best_bic = bic_new
-                    best_tf = tf
-                    best_dbic = dbic
-                    best_r2g = r2g
-                    best_c = mdl.coef_[0]
-                    best_i = mdl.intercept_
+                best_overall = None
+                for fj, fk in remaining:
+                    z_raw = X[fj].values * X[fk].values
+                    best_bic, best_tf, best_dbic = np.inf, None, 0
+                    best_r2g, best_c, best_i = 0, None, None
 
-            if best_dbic <= 0:
-                break  # First failure → stop
+                    for tf in TRANSFORM_TYPES:
+                        zt = apply_transform(z_raw, tf).reshape(-1, 1)
+                        if np.std(zt) == 0:
+                            continue
+                        mdl = LinearRegression().fit(zt, resid_cur)
+                        preds_new = preds_cur + mdl.predict(zt).ravel()
+                        rss_new = np.sum((y_arr - preds_new) ** 2)
+                        r2_new = 1.0 - rss_new / ss_tot
+                        r2g = r2_new - r2_cur
+                        k_new = k_cur + 1
+                        bic_new = (n * np.log(rss_new / n)
+                                   + (k_new * self.interaction_penalty)
+                                   * np.log(n))
+                        dbic = bic_cur - bic_new
+                        if bic_new < best_bic:
+                            best_bic = bic_new
+                            best_tf = tf
+                            best_dbic = dbic
+                            best_r2g = r2g
+                            best_c = mdl.coef_[0]
+                            best_i = mdl.intercept_
 
-            # Add this interaction
-            inter_info = {
-                'feature_j': fj, 'feature_k': fk,
-                'transform': best_tf,
-                'coefficient': best_c, 'intercept': best_i,
-                'r2_gain': best_r2g, 'delta_bic': best_dbic,
-            }
-            current_interactions.append(inter_info)
-            chosen.append(inter_info)
+                    if (best_overall is None
+                            or best_dbic > best_overall['delta_bic']):
+                        best_overall = {
+                            'feature_j': fj, 'feature_k': fk,
+                            'transform': best_tf,
+                            'coefficient': best_c, 'intercept': best_i,
+                            'r2_gain': best_r2g, 'delta_bic': best_dbic,
+                        }
 
-            # Coordinate descent on full model (base + all interactions)
-            self._coord_descent_with_interactions(
-                X, y_arr, selected, transforms, coefs, intercepts,
-                current_interactions, self.m,
-            )
+                if best_overall is None or best_overall['delta_bic'] <= 0:
+                    break
+
+                current_interactions.append(best_overall)
+                chosen.append(best_overall)
+                remaining = [
+                    (fj, fk) for fj, fk in remaining
+                    if not (fj == best_overall['feature_j']
+                            and fk == best_overall['feature_k'])]
+
+                self._coord_descent_with_interactions(
+                    X, y_arr, selected, transforms, coefs, intercepts,
+                    current_interactions, self.m,
+                )
+
+        else:
+            # --- Fixed-rank mode ---
+            for candidate in screening:
+                if candidate['delta_bic'] <= 0:
+                    break
+
+                fj = candidate['feature_j']
+                fk = candidate['feature_k']
+
+                preds_cur = self._calc_preds(X, selected, transforms,
+                                             coefs, intercepts)
+                for inter in current_interactions:
+                    z_raw = (X[inter['feature_j']].values
+                             * X[inter['feature_k']].values)
+                    zt = apply_transform(z_raw, inter['transform'])
+                    preds_cur += (inter['coefficient'] * zt
+                                  + inter['intercept'])
+
+                resid_cur = y_arr - preds_cur
+                rss_cur = np.sum(resid_cur ** 2)
+                r2_cur = 1.0 - rss_cur / ss_tot
+                k_cur = k_base + len(current_interactions)
+                bic_cur = (n * np.log(rss_cur / n)
+                           + (k_cur * self.interaction_penalty)
+                           * np.log(n))
+
+                z_raw = X[fj].values * X[fk].values
+                best_bic, best_tf, best_dbic = np.inf, None, 0
+                best_r2g, best_c, best_i = 0, None, None
+
+                for tf in TRANSFORM_TYPES:
+                    zt = apply_transform(z_raw, tf).reshape(-1, 1)
+                    if np.std(zt) == 0:
+                        continue
+                    mdl = LinearRegression().fit(zt, resid_cur)
+                    preds_new = preds_cur + mdl.predict(zt).ravel()
+                    rss_new = np.sum((y_arr - preds_new) ** 2)
+                    r2_new = 1.0 - rss_new / ss_tot
+                    r2g = r2_new - r2_cur
+                    k_new = k_cur + 1
+                    bic_new = (n * np.log(rss_new / n)
+                               + (k_new * self.interaction_penalty)
+                               * np.log(n))
+                    dbic = bic_cur - bic_new
+                    if bic_new < best_bic:
+                        best_bic = bic_new
+                        best_tf = tf
+                        best_dbic = dbic
+                        best_r2g = r2g
+                        best_c = mdl.coef_[0]
+                        best_i = mdl.intercept_
+
+                if best_dbic <= 0:
+                    break
+
+                inter_info = {
+                    'feature_j': fj, 'feature_k': fk,
+                    'transform': best_tf,
+                    'coefficient': best_c, 'intercept': best_i,
+                    'r2_gain': best_r2g, 'delta_bic': best_dbic,
+                }
+                current_interactions.append(inter_info)
+                chosen.append(inter_info)
+
+                self._coord_descent_with_interactions(
+                    X, y_arr, selected, transforms, coefs, intercepts,
+                    current_interactions, self.m,
+                )
 
         # Build results table for reporting
         results = []
