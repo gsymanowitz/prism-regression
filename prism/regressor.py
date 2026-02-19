@@ -478,11 +478,19 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         }
 
     def _step2_sequential(self, X, y, verbose):
-        """Sequential forward selection with transformation retesting."""
+        """Sequential forward selection with full re-competition.
+
+        At each round, ALL remaining variables compete — each is tested
+        with all 7 transformations on the current residuals, and the
+        variable+transformation pair with the highest F-statistic wins.
+        Step 1 ordering is used only for initial screening/ranking,
+        not to fix the selection order.
+        """
         n = len(y)
-        feature_order = self.step1_results_['feature_order']
+        all_features = list(self.step1_results_['feature_order'])
 
         selected = []
+        remaining = set(all_features)
         transforms = {}
         coefs = {}
         intercepts = {}
@@ -492,7 +500,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         if verbose:
             print()
 
-        for rnd, feat in enumerate(feature_order, 1):
+        for rnd in range(1, len(all_features) + 1):
             # Current predictions / residuals
             if selected:
                 preds = self._calc_preds(X, selected, transforms, coefs,
@@ -507,28 +515,32 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
             r2_before = current_r2
 
-            # Test every transform on residuals
-            best_f, best_tf = -1.0, None
-            for tf in TRANSFORM_TYPES:
-                xt = apply_transform(X[feat].values, tf).reshape(-1, 1)
-                if np.std(xt) == 0:
-                    continue
-                mdl = LinearRegression().fit(xt, residuals)
-                ss_r = np.sum((residuals - mdl.predict(xt)) ** 2)
-                ss_t = np.sum((residuals - residuals.mean()) ** 2)
-                if ss_t == 0:
-                    continue
-                r2_resid = 1.0 - ss_r / ss_t
-                r2_inc = r2_resid * (1.0 - current_r2)
-                denom = 1.0 - current_r2 - r2_inc
-                if denom > 0:
-                    f_stat = (r2_inc / 1.0) / (
-                        denom / max(n - len(selected) - 2, 1)
-                    )
-                else:
-                    f_stat = 0.0
-                if f_stat > best_f:
-                    best_f, best_tf = f_stat, tf
+            # Evaluate ALL remaining variables × ALL transforms
+            best_f, best_feat, best_tf = -1.0, None, None
+            for feat in remaining:
+                for tf in TRANSFORM_TYPES:
+                    xt = apply_transform(X[feat].values, tf).reshape(-1, 1)
+                    if np.std(xt) == 0:
+                        continue
+                    mdl = LinearRegression().fit(xt, residuals)
+                    ss_r = np.sum((residuals - mdl.predict(xt)) ** 2)
+                    ss_t = np.sum((residuals - residuals.mean()) ** 2)
+                    if ss_t == 0:
+                        continue
+                    r2_resid = 1.0 - ss_r / ss_t
+                    r2_inc = r2_resid * (1.0 - current_r2)
+                    denom = 1.0 - current_r2 - r2_inc
+                    if denom > 0:
+                        f_stat = (r2_inc / 1.0) / (
+                            denom / max(n - len(selected) - 2, 1)
+                        )
+                    else:
+                        f_stat = 0.0
+                    if f_stat > best_f:
+                        best_f, best_feat, best_tf = f_stat, feat, tf
+
+            if best_feat is None:
+                break
 
             # Stopping rule
             f_crit = stats.f.ppf(
@@ -536,17 +548,19 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             )
             if best_f < f_crit:
                 if verbose:
-                    print(f"  Round {rnd}: {feat} ({best_tf})  "
+                    print(f"  Round {rnd}: {best_feat} ({best_tf})  "
                           f"F={best_f:.1f} < {f_crit:.1f} -> STOP")
                 break
 
-            # Add variable
-            selected.append(feat)
-            transforms[feat] = best_tf
-            xt = apply_transform(X[feat].values, best_tf).reshape(-1, 1)
+            # Add winning variable
+            selected.append(best_feat)
+            remaining.discard(best_feat)
+            transforms[best_feat] = best_tf
+            xt = apply_transform(
+                X[best_feat].values, best_tf).reshape(-1, 1)
             mdl = LinearRegression().fit(xt, residuals)
-            coefs[feat] = mdl.coef_[0]
-            intercepts[feat] = mdl.intercept_
+            coefs[best_feat] = mdl.coef_[0]
+            intercepts[best_feat] = mdl.intercept_
 
             # Coordinate descent (m iterations)
             self._coord_descent(X, y.values, selected, transforms,
@@ -561,13 +575,14 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             r2_gain = new_r2 - r2_before
 
             rounds.append({
-                'Round': rnd, 'Feature': feat, 'Transform': best_tf,
+                'Round': rnd, 'Feature': best_feat,
+                'Transform': best_tf,
                 'F-statistic': best_f, 'R2_gain': r2_gain,
                 'Cumulative_R2': new_r2,
             })
 
             if verbose:
-                print(f"  Round {rnd}: {feat:20s} ({best_tf:12s})  "
+                print(f"  Round {rnd}: {best_feat:20s} ({best_tf:12s})  "
                       f"ΔR²={r2_gain*100:6.2f}%  "
                       f"Cum={new_r2*100:6.2f}%  F={best_f:.0f}")
 
