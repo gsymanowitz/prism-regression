@@ -407,8 +407,9 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
     def plot_results(self, X, y, figsize=(15, 10)):
         """
-        Create diagnostic plots: partial residual plots for each selected
-        variable plus a predicted-vs-actual plot.
+        Create diagnostic plots in two figures:
+          Figure 1: Partial residual plots for each selected variable
+          Figure 2: Predicted vs actual y values
 
         Partial residuals for variable j:
             e_j = y - ŷ_{-j}  (prediction from all OTHER variables)
@@ -419,14 +420,13 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         y = np.asarray(y, dtype=np.float64).ravel()
 
         feats = self.selected_features_
-        n_plots = len(feats) + 1
         ncols = 3
-        nrows = (n_plots + ncols - 1) // ncols
+        nrows = (len(feats) + ncols - 1) // ncols
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+        # --- Figure 1: Partial residual plots ---
+        fig1, axes = plt.subplots(nrows, ncols, figsize=figsize)
         axes = axes.flatten()
 
-        # Full prediction for computing partial residuals
         y_pred_full = self._predict_internal(X)
 
         for idx, feat in enumerate(feats):
@@ -437,7 +437,6 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             intc = self.intercepts_[feat]
             component_j = coef * xt + intc
 
-            # Partial residual: y minus prediction from all OTHER variables
             partial_resid = y - (y_pred_full - component_j)
 
             order = np.argsort(xv)
@@ -454,8 +453,14 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             ax.legend(fontsize=8, loc='best')
             ax.grid(True, alpha=0.3)
 
-        # Predicted vs actual
-        ax = axes[len(feats)]
+        for idx in range(len(feats), len(axes)):
+            axes[idx].set_visible(False)
+
+        fig1.suptitle("Partial Residual Plots", fontsize=14, y=1.01)
+        fig1.tight_layout()
+
+        # --- Figure 2: Predicted vs Actual ---
+        fig2, ax = plt.subplots(1, 1, figsize=(7, 6))
         ax.scatter(y, y_pred_full, alpha=0.15, s=6, color='steelblue')
         lo = min(y.min(), y_pred_full.min())
         hi = max(y.max(), y_pred_full.max())
@@ -463,14 +468,11 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         ax.set_xlabel("Actual y")
         ax.set_ylabel("Predicted y")
         ax.set_title(f"Predicted vs Actual (R²={self.r2_:.4f})")
-        ax.legend(fontsize=8, loc='best')
+        ax.legend(fontsize=10, loc='best')
         ax.grid(True, alpha=0.3)
+        fig2.tight_layout()
 
-        for idx in range(len(feats) + 1, len(axes)):
-            axes[idx].set_visible(False)
-
-        plt.tight_layout()
-        return fig
+        return fig1, fig2
 
     # ---- Step implementations --------------------------------------------
 
