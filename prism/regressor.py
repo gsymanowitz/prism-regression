@@ -476,14 +476,18 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         return fig1, fig2
 
 
+
     def plot_prism_chart(self, figsize=(18, 11), ols_baseline=True,
                          title="PRISM Chart",
                          subtitle="Sequential Variance Decomposition "
                                   "and Best-fit Variable Transforms",
-                         dataset_name=None):
+                         dataset_name=None, logo_path=None):
         """
         Generate the signature PRISM waterfall chart showing sequential
         variance attribution with transformation mini-curves.
+
+        Variables are displayed in decreasing order of incremental R²
+        contribution (largest first).
 
         Parameters
         ----------
@@ -492,6 +496,9 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         title : str
         subtitle : str
         dataset_name : str or None
+            Shown on a separate line below the subtitle.
+        logo_path : str or None
+            Path to a logo image (PNG) to display in the top-left corner.
 
         Returns
         -------
@@ -505,12 +512,19 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         # --- Collect data from fitted model ---
         feats = list(self.selected_features_)
         n_sel = len(feats)
-        inc_r2 = [v * 100 for v in self.incremental_r2_[:n_sel]]
-        transforms = [self.transform_dict_[f] for f in feats]
+        inc_r2_raw = [v * 100 for v in self.incremental_r2_[:n_sel]]
+        transforms_raw = [self.transform_dict_[f] for f in feats]
         total_r2 = self.r2_ * 100
         ols_val = self._ols_r2 * 100 if hasattr(self, '_ols_r2') else None
 
-        variables = feats + ['TOTAL']
+        # Sort variables by decreasing incremental R²
+        order = sorted(range(n_sel), key=lambda k: inc_r2_raw[k],
+                        reverse=True)
+        feats_sorted = [feats[k] for k in order]
+        inc_r2 = [inc_r2_raw[k] for k in order]
+        transforms = [transforms_raw[k] for k in order]
+
+        variables = feats_sorted + ['TOTAL']
         incremental = inc_r2 + [total_r2]
         all_transforms = transforms + ['']
         cumulative = list(np.cumsum([0.0] + inc_r2))
@@ -527,18 +541,31 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
         y_axis_max = math.ceil(total_r2 / 10) * 10
 
-        # --- Figure & axes ---
+        # --- Figure ---
         fig = plt.figure(figsize=figsize)
         fig.patch.set_facecolor('white')
 
+        # Logo (top-left)
+        if logo_path is not None:
+            try:
+                from PIL import Image
+                logo = Image.open(logo_path)
+                logo_ax = fig.add_axes([0.02, 0.84, 0.12, 0.12],
+                                       anchor='NW', zorder=1)
+                logo_ax.imshow(logo)
+                logo_ax.axis('off')
+            except Exception:
+                pass  # silently skip if logo can't be loaded
+
+        # Title & subtitle & dataset name (each on own line)
         fig.text(0.5, 0.98, title,
                  ha='center', va='top', fontsize=36,
                  fontweight='bold', color='#2d3748')
-        sub = subtitle
-        if dataset_name:
-            sub += '\n' + dataset_name
-        fig.text(0.5, 0.93, sub,
+        fig.text(0.5, 0.93, subtitle,
                  ha='center', va='top', fontsize=17, color='#718096')
+        if dataset_name:
+            fig.text(0.5, 0.90, dataset_name,
+                     ha='center', va='top', fontsize=17, color='#718096')
 
         ax = fig.add_axes([0.10, 0.10, 0.85, 0.73])
 
@@ -568,6 +595,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                             [cumulative[i + 1], cumulative[i + 1]],
                             'k--', lw=1.8, alpha=0.35, zorder=1)
             else:
+                # TOTAL bar
                 rect = FancyBboxPatch(
                     (bl, 0), bar_width, total_r2,
                     boxstyle='round,pad=0.05',
@@ -593,7 +621,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                                       facecolor='#ef4444',
                                       edgecolor='none', alpha=0.95))
 
-        # --- Variable blocks below chart (in data coordinates) ---
+        # --- Variable blocks below chart (data coordinates) ---
         block_height_data = 30
         block_bottom_data = -33
 
@@ -653,6 +681,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 ax.plot(cx_s, cy_s, 'w-', lw=2.5, alpha=0.95, zorder=3)
 
             else:
+                # TOTAL block
                 block = FancyBboxPatch(
                     (bl, block_bottom_data), bar_width, block_height_data,
                     boxstyle='round,pad=0.05',
