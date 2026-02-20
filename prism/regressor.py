@@ -290,7 +290,8 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
     # ---- public interface ------------------------------------------------
 
-    def fit(self, X, y, include_interactions=True, verbose=True):
+    def fit(self, X, y, include_interactions=True, verbose=True,
+            dataset_name=None, logo_path=None):
         """
         Fit PRISM model.
 
@@ -306,6 +307,10 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             Whether to run Phase 2 (interaction testing).
         verbose : bool, default=True
             Print progress.
+        dataset_name : str or None
+            Name shown on the PRISM chart (below subtitle).
+        logo_path : str or None
+            Path to a logo image (PNG) for the PRISM chart top-left.
 
         Returns
         -------
@@ -364,11 +369,14 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         self.runtime_ = time.time() - t0
 
         self._is_fitted = True
+        self._dataset_name = dataset_name
+        self._logo_path = logo_path
 
         if verbose:
             self._print_summary()
             self.plot_results(X, y)
-            self.plot_prism_chart()
+            self.plot_prism_chart(dataset_name=dataset_name,
+                                  logo_path=logo_path)
             plt.show()
 
         return self
@@ -508,6 +516,12 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         import math
 
         self._check_fitted()
+
+        # Fall back to values stored during fit() if not provided
+        if dataset_name is None and hasattr(self, '_dataset_name'):
+            dataset_name = self._dataset_name
+        if logo_path is None and hasattr(self, '_logo_path'):
+            logo_path = self._logo_path
 
         # --- Collect data from fitted model ---
         feats = list(self.selected_features_)
