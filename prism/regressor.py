@@ -363,10 +363,13 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         self._compile(X, y, include_interactions, verbose)
         self.runtime_ = time.time() - t0
 
+        self._is_fitted = True
+
         if verbose:
             self._print_summary()
+            self.plot_results(X, y)
+            plt.show()
 
-        self._is_fitted = True
         return self
 
     def predict(self, X):
