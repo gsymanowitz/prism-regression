@@ -368,6 +368,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         if verbose:
             self._print_summary()
             self.plot_results(X, y)
+            self.plot_prism_chart()
             plt.show()
 
         return self
@@ -473,6 +474,244 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         fig2.tight_layout()
 
         return fig1, fig2
+
+    def plot_prism_chart(self, figsize=(18, 12), ols_baseline=True,
+                         title="PRISM Chart", dataset_name=None):
+        """
+        Generate the signature PRISM waterfall chart showing sequential
+        variance attribution with transformation mini-curves.
+
+        Waterfall bars show incremental R² contributions stacked
+        cumulatively. Below each bar, a block displays the variable name,
+        transformation type, contribution percentage, and a mini-curve
+        illustrating the transformation shape.
+
+        Parameters
+        ----------
+        figsize : tuple, default=(18, 12)
+            Figure size in inches.
+        ols_baseline : bool, default=True
+            Show OLS R² baseline as a red dashed line.
+        title : str
+            Chart title.
+        dataset_name : str or None
+            Subtitle dataset description.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        from matplotlib.patches import FancyBboxPatch
+
+        self._check_fitted()
+
+        # --- Collect data from fitted model ---
+        feats = self.selected_features_
+        n_vars = len(feats)
+        inc_r2 = [v * 100 for v in self.incremental_r2_[:n_vars]]
+        transforms = [self.transform_dict_[f] for f in feats]
+        total_r2 = self.r2_ * 100
+
+        # Add TOTAL
+        variables = list(feats) + ['TOTAL']
+        cumulative = np.cumsum([0.0] + inc_r2)
+        num_bars = len(variables)
+
+        # Prism rainbow colours + grey for total
+        rainbow = [
+            '#c084fc', '#818cf8', '#38bdf8', '#22d3ee',
+            '#34d399', '#a3e635', '#facc15', '#fb923c',
+            '#f87171', '#e879f9', '#a78bfa', '#67e8f9',
+        ]
+        colors = [rainbow[i % len(rainbow)] for i in range(n_vars)]
+        colors.append('#6b7280')  # grey total
+
+        y_axis_max = int(np.ceil(total_r2 / 10) * 10) + 10
+
+        # --- Mini-curve helper ---
+        def _draw_mini_curve(ax_mini, tf):
+            """Draw a small transformation curve inside a block."""
+            t = np.linspace(0.05, 0.95, 50)
+            curves = {
+                'Linear':      t,
+                'Logarithmic': np.log(t * 3 + 1) / np.log(4),
+                'Sqrt':        np.sqrt(t),
+                'Square':      t ** 2,
+                'Cubic':       0.5 + 0.5 * (2 * t - 1) ** 3,
+                'Inverse':     1.0 / (t * 4 + 0.5),
+                'Exponential': (np.exp(t * 2) - 1) / (np.exp(2) - 1),
+            }
+            curve_y = curves.get(tf, t)
+            # Normalise to [0.1, 0.9]
+            mn, mx = curve_y.min(), curve_y.max()
+            if mx - mn > 1e-8:
+                curve_y = 0.1 + 0.8 * (curve_y - mn) / (mx - mn)
+            ax_mini.plot(t, curve_y, color='white', lw=2.5, alpha=0.9)
+            ax_mini.set_xlim(0, 1)
+            ax_mini.set_ylim(0, 1)
+            ax_mini.axis('off')
+
+        # --- Create figure with explicit layout regions ---
+        fig = plt.figure(figsize=figsize)
+        fig.patch.set_facecolor('white')
+
+        # Layout: title region (top 8%), chart (middle 55%), blocks (25%),
+        #         info text (bottom 5%), gaps between
+        chart_bottom = 0.30
+        chart_height = 0.55
+        chart_left = 0.08
+        chart_width = 0.88
+
+        ax = fig.add_axes([chart_left, chart_bottom,
+                           chart_width, chart_height])
+
+        # Title / subtitle
+        fig.text(0.5, 0.96, title,
+                 ha='center', va='top', fontsize=28,
+                 fontweight='bold', color='#2d3748')
+        sub = 'Sequential Variance Decomposition and Best-fit Transforms'
+        if dataset_name:
+            sub += f' - {dataset_name}'
+        fig.text(0.5, 0.915, sub,
+                 ha='center', va='top', fontsize=14, color='#718096')
+
+        # --- Waterfall bars ---
+        bar_width = 0.75
+        for i in range(num_bars):
+            left = i + (1 - bar_width) / 2
+            if i < n_vars:
+                height = inc_r2[i]
+                bottom = cumulative[i]
+                rect = FancyBboxPatch(
+                    (left, bottom), bar_width, max(height, 0.3),
+                    boxstyle='round,pad=0.04',
+                    facecolor=colors[i], edgecolor='none',
+                    alpha=0.90, zorder=2)
+                ax.add_patch(rect)
+
+                # ΔR² label above bar
+                ax.text(i + 0.5, bottom + height + 0.8,
+                        f'+{height:.1f}%',
+                        ha='center', va='bottom', fontsize=10,
+                        fontweight='bold',
+                        bbox=dict(boxstyle='round,pad=0.35',
+                                  facecolor='white',
+                                  edgecolor='#e2e8f0', alpha=0.9))
+
+                # Dashed connector to next bar
+                if i < n_vars - 1:
+                    ax.plot([left + bar_width,
+                             i + 1 + (1 - bar_width) / 2],
+                            [cumulative[i + 1], cumulative[i + 1]],
+                            'k--', lw=1.2, alpha=0.3, zorder=1)
+            else:
+                # TOTAL bar (from 0)
+                rect = FancyBboxPatch(
+                    (left, 0), bar_width, total_r2,
+                    boxstyle='round,pad=0.04',
+                    facecolor=colors[i], edgecolor='none',
+                    alpha=0.90, zorder=2)
+                ax.add_patch(rect)
+                ax.text(i + 0.5, total_r2 + 0.8,
+                        f'R\u00b2 = {total_r2:.1f}%',
+                        ha='center', va='bottom', fontsize=12,
+                        fontweight='bold',
+                        bbox=dict(boxstyle='round,pad=0.35',
+                                  facecolor='white',
+                                  edgecolor='#e2e8f0', alpha=0.9))
+
+        # OLS baseline
+        if ols_baseline and hasattr(self, '_ols_r2'):
+            ols_val = self._ols_r2 * 100
+            ax.axhline(y=ols_val, color='#ef4444', ls='--', lw=2,
+                        alpha=0.7, zorder=1)
+            ax.text(num_bars - 0.3, ols_val + 0.5,
+                    f'OLS: {ols_val:.1f}%',
+                    ha='right', va='bottom', fontsize=10,
+                    color='#ef4444', fontweight='bold')
+
+        # --- Axis formatting ---
+        ax.set_xlim(-0.2, num_bars + 0.2)
+        ax.set_ylim(0, y_axis_max)
+        ax.set_ylabel('Cumulative R\u00b2 (%)', fontsize=13,
+                       fontweight='600', color='#4a5568')
+        ax.set_xticks([])
+        y_ticks = list(range(0, y_axis_max + 1, 10))
+        ax.set_yticks(y_ticks)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_color('#cbd5e0')
+        for yt in range(10, y_axis_max + 1, 10):
+            ax.axhline(y=yt, color='#e2e8f0', ls='-', lw=0.5,
+                        alpha=0.3, zorder=0)
+        ax.tick_params(axis='y', labelsize=11, colors='#4a5568')
+
+        # --- Variable blocks with transformation curves BELOW chart ---
+        block_top = chart_bottom - 0.02
+        block_h = 0.18
+        block_bottom = block_top - block_h
+
+        for i in range(num_bars):
+            bw = chart_width / num_bars
+            bx = chart_left + i * bw + 0.004
+            bw_actual = bw - 0.008
+
+            if i < n_vars:
+                block_ax = fig.add_axes(
+                    [bx, block_bottom, bw_actual, block_h], zorder=5)
+                block_ax.set_facecolor(colors[i])
+                for spine in block_ax.spines.values():
+                    spine.set_visible(False)
+
+                # Variable name
+                block_ax.text(0.5, 0.90, feats[i],
+                              ha='center', va='top', fontsize=9,
+                              fontweight='bold', color='white',
+                              transform=block_ax.transAxes)
+                # Transformation label
+                block_ax.text(0.5, 0.74,
+                              f'({transforms[i]})',
+                              ha='center', va='top', fontsize=8,
+                              color='white', alpha=0.85,
+                              transform=block_ax.transAxes)
+                # Contribution
+                block_ax.text(0.5, 0.10,
+                              f'{inc_r2[i]:.1f}%',
+                              ha='center', va='bottom', fontsize=10,
+                              fontweight='bold', color='white',
+                              transform=block_ax.transAxes)
+
+                # Mini transformation curve
+                _draw_mini_curve(block_ax, transforms[i])
+            else:
+                # TOTAL block
+                block_ax = fig.add_axes(
+                    [bx, block_bottom, bw_actual, block_h], zorder=5)
+                block_ax.set_facecolor('#4b5563')
+                for spine in block_ax.spines.values():
+                    spine.set_visible(False)
+                block_ax.text(0.5, 0.65, 'TOTAL',
+                              ha='center', va='center', fontsize=11,
+                              fontweight='bold', color='white',
+                              transform=block_ax.transAxes)
+                block_ax.text(0.5, 0.30,
+                              f'{total_r2:.1f}%',
+                              ha='center', va='center', fontsize=13,
+                              fontweight='bold', color='white',
+                              transform=block_ax.transAxes)
+                block_ax.axis('off')
+
+        # Info text at very bottom
+        info = ('Each bar shows a variable\'s incremental R\u00b2 '
+                'contribution. Dashed lines connect the contributions. '
+                'The blocks below display each variable\'s transformation '
+                'type, contribution percentage, and a curve showing that '
+                'transformation\'s shape.')
+        fig.text(0.5, 0.02, info, ha='center', va='bottom', fontsize=9,
+                 color='#718096', style='italic')
+
+        return fig
 
     # ---- Step implementations --------------------------------------------
 
