@@ -259,8 +259,6 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         interaction_recompete=True,
         max_iterations=100,
         convergence_tolerance=1e-8,
-        dataset_name=None,
-        logo_path=None,
     ):
         self.m = m
         self.alpha = alpha
@@ -268,10 +266,6 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         self.interaction_recompete = interaction_recompete
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
-
-        # Chart display options
-        self._dataset_name = dataset_name
-        self._logo_path = logo_path
 
         # --- attributes set during fit ---
         self.step1_results_ = None
@@ -297,7 +291,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
     # ---- public interface ------------------------------------------------
 
     def fit(self, X, y, include_interactions=True, verbose=True,
-            dataset_name=None, logo_path=None):
+            dataset_name=None):
         """
         Fit PRISM model.
 
@@ -315,8 +309,6 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             Print progress.
         dataset_name : str or None
             Name shown on the PRISM chart (below subtitle).
-        logo_path : str or None
-            Path to a logo image (PNG) for the PRISM chart top-left.
 
         Returns
         -------
@@ -375,18 +367,12 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         self.runtime_ = time.time() - t0
 
         self._is_fitted = True
-
-        # Merge: fit() args override __init__ args
-        if dataset_name is not None:
-            self._dataset_name = dataset_name
-        if logo_path is not None:
-            self._logo_path = logo_path
+        self._dataset_name = dataset_name
 
         if verbose:
             self._print_summary()
             self.plot_results(X, y)
-            self.plot_prism_chart(dataset_name=self._dataset_name,
-                                  logo_path=self._logo_path)
+            self.plot_prism_chart(dataset_name=dataset_name)
             plt.show()
 
         return self
@@ -499,7 +485,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                          title="PRISM Chart",
                          subtitle="Sequential Variance Decomposition "
                                   "and Best-fit Variable Transforms",
-                         dataset_name=None, logo_path=None):
+                         dataset_name=None):
         """
         Generate the signature PRISM waterfall chart showing sequential
         variance attribution with transformation mini-curves.
@@ -515,8 +501,6 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         subtitle : str
         dataset_name : str or None
             Shown on a separate line below the subtitle.
-        logo_path : str or None
-            Path to a logo image (PNG) to display in the top-left corner.
 
         Returns
         -------
@@ -527,11 +511,9 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
         self._check_fitted()
 
-        # Fall back to values stored during fit() if not provided
+        # Fall back to value stored during fit()
         if dataset_name is None and hasattr(self, '_dataset_name'):
             dataset_name = self._dataset_name
-        if logo_path is None and hasattr(self, '_logo_path'):
-            logo_path = self._logo_path
 
         # --- Collect data from fitted model ---
         feats = list(self.selected_features_)
@@ -569,17 +551,21 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         fig = plt.figure(figsize=figsize)
         fig.patch.set_facecolor('white')
 
-        # Logo (top-left)
-        if logo_path is not None:
-            try:
-                from PIL import Image
-                logo = Image.open(logo_path)
-                logo_ax = fig.add_axes([0.02, 0.84, 0.12, 0.12],
-                                       anchor='NW', zorder=1)
-                logo_ax.imshow(logo)
-                logo_ax.axis('off')
-            except Exception:
-                pass  # silently skip if logo can't be loaded
+        # Logo (fetched from GitHub)
+        _LOGO_URL = ("https://raw.githubusercontent.com/gsymanowitz/"
+                     "prism-regression/main/prism_logo.png")
+        try:
+            import urllib.request
+            import io
+            from PIL import Image as _PILImage
+            with urllib.request.urlopen(_LOGO_URL, timeout=5) as resp:
+                logo = _PILImage.open(io.BytesIO(resp.read()))
+            logo_ax = fig.add_axes([0.02, 0.84, 0.12, 0.12],
+                                   anchor='NW', zorder=1)
+            logo_ax.imshow(logo)
+            logo_ax.axis('off')
+        except Exception:
+            pass  # no logo if offline or URL unreachable
 
         # Title & subtitle & dataset name (each on own line)
         fig.text(0.5, 0.98, title,
@@ -1506,7 +1492,8 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 # Convenience function
 # ---------------------------------------------------------------------------
 
-def fit_prism(X, y, m=10, include_interactions=True, verbose=True):
+def fit_prism(X, y, m=10, include_interactions=True, verbose=True,
+              dataset_name=None):
     """
     One-liner convenience function.
 
@@ -1522,6 +1509,8 @@ def fit_prism(X, y, m=10, include_interactions=True, verbose=True):
         Run Phase 2?
     verbose : bool
         Print progress?
+    dataset_name : str or None
+        Name shown on the PRISM chart.
 
     Returns
     -------
@@ -1529,5 +1518,6 @@ def fit_prism(X, y, m=10, include_interactions=True, verbose=True):
         Fitted model.
     """
     mdl = PRISMRegressor(m=m)
-    mdl.fit(X, y, include_interactions=include_interactions, verbose=verbose)
+    mdl.fit(X, y, include_interactions=include_interactions,
+            verbose=verbose, dataset_name=dataset_name)
     return mdl
