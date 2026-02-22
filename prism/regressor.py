@@ -52,9 +52,9 @@ def apply_transform(x, transform_type):
     if transform_type == 'Linear':
         result = x
     elif transform_type == 'Logarithmic':
-        result = np.log(x + 1)                       # NOT log(|x|+1)
+        result = np.sign(x) * np.log1p(np.abs(x))    # sign-preserving
     elif transform_type == 'Sqrt':
-        result = np.sqrt(np.abs(x))
+        result = np.sign(x) * np.sqrt(np.abs(x))     # sign-preserving
     elif transform_type == 'Square':
         result = x ** 2
     elif transform_type == 'Cubic':
