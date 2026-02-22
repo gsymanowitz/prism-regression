@@ -259,6 +259,8 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         interaction_recompete=True,
         max_iterations=100,
         convergence_tolerance=1e-8,
+        dataset_name=None,
+        logo_path=None,
     ):
         self.m = m
         self.alpha = alpha
@@ -266,6 +268,10 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         self.interaction_recompete = interaction_recompete
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
+
+        # Chart display options
+        self._dataset_name = dataset_name
+        self._logo_path = logo_path
 
         # --- attributes set during fit ---
         self.step1_results_ = None
@@ -369,14 +375,18 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         self.runtime_ = time.time() - t0
 
         self._is_fitted = True
-        self._dataset_name = dataset_name
-        self._logo_path = logo_path
+
+        # Merge: fit() args override __init__ args
+        if dataset_name is not None:
+            self._dataset_name = dataset_name
+        if logo_path is not None:
+            self._logo_path = logo_path
 
         if verbose:
             self._print_summary()
             self.plot_results(X, y)
-            self.plot_prism_chart(dataset_name=dataset_name,
-                                  logo_path=logo_path)
+            self.plot_prism_chart(dataset_name=self._dataset_name,
+                                  logo_path=self._logo_path)
             plt.show()
 
         return self
