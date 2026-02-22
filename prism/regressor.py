@@ -490,12 +490,16 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         Generate the signature PRISM waterfall chart showing sequential
         variance attribution with transformation mini-curves.
 
-        Variables are displayed in decreasing order of incremental R²
-        contribution (largest first).
+        Variables (including interactions) are displayed in decreasing
+        order of incremental R² contribution (largest first).  Font sizes,
+        bar widths, and figure width scale automatically so the chart
+        remains readable with up to ~25 terms.
 
         Parameters
         ----------
-        figsize : tuple, default=(18, 11)
+        figsize : tuple or None
+            Figure size.  When None the width scales with the number of
+            terms (base 18 in, +0.9 in per term beyond 9).
         ols_baseline : bool, default=True
         title : str
         subtitle : str
@@ -515,26 +519,54 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         if dataset_name is None and hasattr(self, '_dataset_name'):
             dataset_name = self._dataset_name
 
-        # --- Collect data from fitted model ---
+        # --- Collect data from fitted model (base + interactions) ---
         feats = list(self.selected_features_)
         n_sel = len(feats)
         inc_r2_raw = [v * 100 for v in self.incremental_r2_[:n_sel]]
         transforms_raw = [self.transform_dict_[f] for f in feats]
+
+        # Append interaction terms
+        inter_names = []
+        inter_r2 = []
+        inter_transforms = []
+        if self.interactions_:
+            for inter in self.interactions_:
+                inter_names.append(
+                    f"{inter['feature_j']}\n× {inter['feature_k']}")
+                inter_r2.append(inter['r2_gain'] * 100)
+                inter_transforms.append(inter['transform'])
+
+        # Combine base variables + interactions, then sort by contribution
+        all_names = feats + inter_names
+        all_r2 = inc_r2_raw + inter_r2
+        all_trans = transforms_raw + inter_transforms
+        n_terms = len(all_names)
+
+        order = sorted(range(n_terms), key=lambda k: all_r2[k],
+                        reverse=True)
+        names_sorted = [all_names[k] for k in order]
+        r2_sorted = [all_r2[k] for k in order]
+        trans_sorted = [all_trans[k] for k in order]
+        is_interaction = [k >= n_sel for k in order]
+
         total_r2 = self.r2_ * 100
         ols_val = self._ols_r2 * 100 if hasattr(self, '_ols_r2') else None
 
-        # Sort variables by decreasing incremental R²
-        order = sorted(range(n_sel), key=lambda k: inc_r2_raw[k],
-                        reverse=True)
-        feats_sorted = [feats[k] for k in order]
-        inc_r2 = [inc_r2_raw[k] for k in order]
-        transforms = [transforms_raw[k] for k in order]
-
-        variables = feats_sorted + ['TOTAL']
-        incremental = inc_r2 + [total_r2]
-        all_transforms = transforms + ['']
-        cumulative = list(np.cumsum([0.0] + inc_r2))
+        variables = names_sorted + ['TOTAL']
+        incremental = r2_sorted + [total_r2]
+        all_transforms = trans_sorted + ['']
+        cumulative = list(np.cumsum([0.0] + r2_sorted))
         num_vars = len(variables)
+
+        # --- Adaptive sizing ------------------------------------------------
+        # Scale figure width and fonts for many terms
+        if figsize is None:
+            fig_w = max(18, 9 + num_vars * 1.0)
+            figsize = (fig_w, 11)
+
+        # Font scale factor: 1.0 for ≤9 terms, shrinks for more
+        fs = min(1.0, 9.0 / max(num_vars, 1))
+        fs = max(fs, 0.55)  # floor so text doesn't vanish
 
         # Prism spectrum colours + grey for total
         rainbow = [
@@ -542,12 +574,12 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             '#34d399', '#facc15', '#fb923c', '#f87171',
             '#e879f9', '#a78bfa', '#67e8f9', '#a3e635',
         ]
-        colors = [rainbow[i % len(rainbow)] for i in range(n_sel)]
+        colors = [rainbow[i % len(rainbow)] for i in range(n_terms)]
         colors.append('#6b7280')
 
         y_axis_max = math.ceil(total_r2 / 10) * 10
 
-        # --- Figure ---
+        # --- Figure ---------------------------------------------------------
         fig = plt.figure(figsize=figsize)
         fig.patch.set_facecolor('white')
 
@@ -581,26 +613,30 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
         bar_width = 0.9
 
-        # --- Waterfall bars ---
+        # --- Waterfall bars -------------------------------------------------
         for i in range(num_vars):
             bl = i
-            if i < n_sel:
-                height = inc_r2[i]
+            if i < n_terms:
+                height = r2_sorted[i]
                 bottom = cumulative[i]
+                edge = '#4a5568' if is_interaction[i] else 'none'
+                ls = '--' if is_interaction[i] else '-'
                 rect = FancyBboxPatch(
                     (bl, bottom), bar_width, height,
                     boxstyle='round,pad=0.05',
-                    facecolor=colors[i], edgecolor='none',
+                    facecolor=colors[i], edgecolor=edge,
+                    linewidth=1.5 if is_interaction[i] else 0,
+                    linestyle=ls,
                     alpha=0.92, zorder=2)
                 ax.add_patch(rect)
                 ax.text(bl + bar_width / 2, bottom + height + 1.5,
                         f'+{height:.1f}%',
-                        ha='center', va='bottom', fontsize=13,
-                        fontweight='bold',
+                        ha='center', va='bottom',
+                        fontsize=max(13 * fs, 7), fontweight='bold',
                         bbox=dict(boxstyle='round,pad=0.5',
                                   facecolor='white',
                                   edgecolor='#e2e8f0', alpha=0.95))
-                if i < n_sel - 1:
+                if i < n_terms - 1:
                     ax.plot([bl + bar_width, i + 1],
                             [cumulative[i + 1], cumulative[i + 1]],
                             'k--', lw=1.8, alpha=0.35, zorder=1)
@@ -609,13 +645,13 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 rect = FancyBboxPatch(
                     (bl, 0), bar_width, total_r2,
                     boxstyle='round,pad=0.05',
-                    facecolor=colors[i], edgecolor='none',
+                    facecolor=colors[-1], edgecolor='none',
                     alpha=0.92, zorder=2)
                 ax.add_patch(rect)
                 ax.text(bl + bar_width / 2, total_r2 + 1.5,
                         f'{total_r2:.1f}%',
-                        ha='center', va='bottom', fontsize=14,
-                        fontweight='bold',
+                        ha='center', va='bottom',
+                        fontsize=max(14 * fs, 8), fontweight='bold',
                         bbox=dict(boxstyle='round,pad=0.5',
                                   facecolor='#d1d5db',
                                   edgecolor='#9ca3af', alpha=0.95))
@@ -625,39 +661,47 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                             'r-', lw=4, zorder=10)
                     ax.text(bl - 0.05, ols_val,
                             f'OLS: {ols_val:.1f}%',
-                            ha='right', va='center', fontsize=10,
+                            ha='right', va='center',
+                            fontsize=max(10 * fs, 7),
                             fontweight='bold', color='white',
                             bbox=dict(boxstyle='round,pad=0.4',
                                       facecolor='#ef4444',
                                       edgecolor='none', alpha=0.95))
 
-        # --- Variable blocks below chart (data coordinates) ---
+        # --- Variable blocks below chart (data coordinates) -----------------
         block_height_data = 30
         block_bottom_data = -33
 
         for i, (var, trans, contrib) in enumerate(
                 zip(variables, all_transforms, incremental)):
             bl = i
-            if i < n_sel:
+            if i < n_terms:
+                edge = '#4a5568' if is_interaction[i] else 'none'
+                ls = '--' if is_interaction[i] else '-'
                 block = FancyBboxPatch(
                     (bl, block_bottom_data), bar_width, block_height_data,
                     boxstyle='round,pad=0.05',
-                    facecolor=colors[i], edgecolor='none',
+                    facecolor=colors[i], edgecolor=edge,
+                    linewidth=1.5 if is_interaction[i] else 0,
+                    linestyle=ls,
                     alpha=0.92, zorder=1)
                 ax.add_patch(block)
 
                 ax.text(bl + bar_width / 2,
                         block_bottom_data + block_height_data * 0.92,
-                        var, ha='center', va='top', fontsize=11,
+                        var, ha='center', va='top',
+                        fontsize=max(11 * fs, 6.5),
                         fontweight='bold', color='white', zorder=3)
                 ax.text(bl + bar_width / 2,
-                        block_bottom_data + block_height_data * 0.75,
-                        f'({trans})', ha='center', va='top', fontsize=11,
+                        block_bottom_data + block_height_data * 0.72,
+                        f'({trans})', ha='center', va='top',
+                        fontsize=max(10 * fs, 6),
                         color='white', alpha=0.95, zorder=3)
                 ax.text(bl + bar_width / 2,
-                        block_bottom_data + block_height_data * 0.58,
+                        block_bottom_data + block_height_data * 0.55,
                         f'+{contrib:.1f}%', ha='center', va='top',
-                        fontsize=10.5, fontweight='bold', color='white',
+                        fontsize=max(10.5 * fs, 6.5),
+                        fontweight='bold', color='white',
                         zorder=3,
                         bbox=dict(boxstyle='round,pad=0.35',
                                   facecolor='black', alpha=0.18,
@@ -686,34 +730,36 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                     cy = cx
 
                 cx_s = bl + 0.15 * bar_width + cx * 0.7 * bar_width
-                cy_s = (block_bottom_data + 0.12 * block_height_data
+                cy_s = (block_bottom_data + 0.08 * block_height_data
                         + cy * 0.35 * block_height_data)
-                ax.plot(cx_s, cy_s, 'w-', lw=2.5, alpha=0.95, zorder=3)
+                ax.plot(cx_s, cy_s, 'w-', lw=max(2.5 * fs, 1.2),
+                        alpha=0.95, zorder=3)
 
             else:
                 # TOTAL block
                 block = FancyBboxPatch(
                     (bl, block_bottom_data), bar_width, block_height_data,
                     boxstyle='round,pad=0.05',
-                    facecolor=colors[i], edgecolor='none',
+                    facecolor=colors[-1], edgecolor='none',
                     alpha=0.92, zorder=1)
                 ax.add_patch(block)
                 ax.text(bl + bar_width / 2,
                         block_bottom_data + block_height_data * 0.92,
                         'TOTAL\nEXPLAINED\nVARIANCE',
-                        ha='center', va='top', fontsize=8.5,
+                        ha='center', va='top',
+                        fontsize=max(8.5 * fs, 5.5),
                         fontweight='bold', color='white',
                         linespacing=1.3, zorder=3)
                 ax.text(bl + bar_width / 2,
                         block_bottom_data + block_height_data * 0.58,
                         f'{contrib:.1f}%', ha='center', va='top',
-                        fontsize=12, fontweight='bold', color='white',
-                        zorder=3,
+                        fontsize=max(12 * fs, 7), fontweight='bold',
+                        color='white', zorder=3,
                         bbox=dict(boxstyle='round,pad=0.35',
                                   facecolor='black', alpha=0.22,
                                   edgecolor='none'))
 
-        # --- Info text ---
+        # --- Info text ------------------------------------------------------
         info_y = block_bottom_data - 4
         lines = [
             'How to read this chart:',
@@ -723,12 +769,15 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             'type and contribution percentage, with a curve showing '
             'that transformation\'s shape.',
         ]
+        if any(is_interaction):
+            lines.append(
+                'Dashed outlines indicate interaction terms.')
         for idx, line in enumerate(lines):
             ax.text(0, info_y - idx * 2.5, line,
-                    ha='left', va='top', fontsize=11,
+                    ha='left', va='top', fontsize=max(11 * fs, 7),
                     color='#4a5568', zorder=3)
 
-        # --- Axis formatting ---
+        # --- Axis formatting ------------------------------------------------
         ax.set_xlim(-0.5, num_vars + 0.5)
         ax.set_ylim(info_y - 10, y_axis_max + 10)
         ax.set_ylabel('Cumulative R\u00b2 (%)', fontsize=15,
