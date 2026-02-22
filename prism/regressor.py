@@ -24,23 +24,34 @@ warnings.filterwarnings('ignore')
 # Transformation helpers
 # ---------------------------------------------------------------------------
 
-TRANSFORM_TYPES = [
+TRANSFORM_TYPES_STANDARD = [
     'Linear', 'Logarithmic', 'Sqrt', 'Square',
     'Cubic', 'Inverse', 'Exponential',
 ]
 
+TRANSFORM_TYPES_EXTENDED = [
+    'Linear', 'Logarithmic', 'Sqrt', 'Square',
+    'Cubic', 'Inverse', 'Exponential',
+    'Asinh', 'Quartic', 'Absolute',
+    'Tanh', 'Softsign', 'Arctan',
+    'HumpDecay', 'BellCurve',
+]
+
+# Default (backward compat)
+TRANSFORM_TYPES = TRANSFORM_TYPES_STANDARD
+
 
 def apply_transform(x, transform_type):
     """
-    Apply one of the seven PRISM transformations to a numeric array.
+    Apply a PRISM transformation to a numeric array.
 
     Parameters
     ----------
     x : array-like
         Input values (1-D).
     transform_type : str
-        One of: 'Linear', 'Logarithmic', 'Sqrt', 'Square',
-        'Cubic', 'Inverse', 'Exponential'.
+        Name of the transformation (see TRANSFORM_TYPES_STANDARD and
+        TRANSFORM_TYPES_EXTENDED for valid names).
 
     Returns
     -------
@@ -49,6 +60,7 @@ def apply_transform(x, transform_type):
     """
     x = np.asarray(x, dtype=np.float64).ravel()
 
+    # --- Standard library (7) ---
     if transform_type == 'Linear':
         result = x
     elif transform_type == 'Logarithmic':
@@ -65,6 +77,23 @@ def apply_transform(x, transform_type):
         sigma = np.std(x) + 1                         # NOT +1e-10
         clipped = np.clip(x / sigma, -10, 10)
         result = np.exp(clipped)
+    # --- Extended library (8 additional) ---
+    elif transform_type == 'Asinh':
+        result = np.arcsinh(x)
+    elif transform_type == 'Quartic':
+        result = x ** 4
+    elif transform_type == 'Absolute':
+        result = np.abs(x)
+    elif transform_type == 'Tanh':
+        result = np.tanh(x)
+    elif transform_type == 'Softsign':
+        result = x / (1.0 + np.abs(x))
+    elif transform_type == 'Arctan':
+        result = np.arctan(x)
+    elif transform_type == 'HumpDecay':
+        result = x / (1.0 + x ** 2)
+    elif transform_type == 'BellCurve':
+        result = 1.0 / (1.0 + x ** 2)
     else:
         raise ValueError(f"Unknown transform: {transform_type}")
 
@@ -249,6 +278,14 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         Maximum iterations in Step 3 (final convergence).
     convergence_tolerance : float, default=1e-8
         R-squared change threshold for convergence.
+    transform_library : str, default='standard'
+        Which transformation library to use:
+
+        - ``'standard'`` — the 7 transforms from the paper (Linear,
+          Logarithmic, Sqrt, Square, Cubic, Inverse, Exponential).
+        - ``'extended'`` — the standard 7 plus 8 additional forms
+          (Asinh, Quartic, Absolute, Tanh, Softsign, Arctan,
+          HumpDecay, BellCurve) for a total of 15.
     """
 
     def __init__(
@@ -259,6 +296,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         interaction_recompete=True,
         max_iterations=100,
         convergence_tolerance=1e-8,
+        transform_library='standard',
     ):
         self.m = m
         self.alpha = alpha
@@ -266,6 +304,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         self.interaction_recompete = interaction_recompete
         self.max_iterations = max_iterations
         self.convergence_tolerance = convergence_tolerance
+        self.transform_library = transform_library
 
         # --- attributes set during fit ---
         self.step1_results_ = None
@@ -287,6 +326,13 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 
         self._y_mean = None          # needed for R² calc in score()
         self._is_fitted = False
+
+    @property
+    def _transforms(self):
+        """Return the active transformation list based on transform_library."""
+        if self.transform_library == 'extended':
+            return TRANSFORM_TYPES_EXTENDED
+        return TRANSFORM_TYPES_STANDARD
 
     # ---- public interface ------------------------------------------------
 
@@ -326,8 +372,11 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             print("PRISM REGRESSION ANALYSIS")
             print("=" * 70)
             print(f"  Dataset : n={n}, p={p}")
+            lib_label = (f"{self.transform_library} "
+                         f"({len(self._transforms)} transforms)")
             print(f"  m={self.m}  alpha={self.alpha}  "
                   f"interaction_penalty={self.interaction_penalty}")
+            print(f"  Transform library: {lib_label}")
             print()
 
         # Phase 1, Step 1 -------------------------------------------------
@@ -568,14 +617,23 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         fs = min(1.0, 9.0 / max(num_vars, 1))
         fs = max(fs, 0.55)  # floor so text doesn't vanish
 
-        # Prism spectrum colours + grey for total
-        rainbow = [
+        # Curated prism palette (12 distinct pastel shades)
+        _palette = [
             '#c084fc', '#818cf8', '#38bdf8', '#22d3ee',
             '#34d399', '#facc15', '#fb923c', '#f87171',
             '#e879f9', '#a78bfa', '#67e8f9', '#a3e635',
         ]
-        colors = [rainbow[i % len(rainbow)] for i in range(n_terms)]
-        colors.append('#6b7280')
+        if n_terms <= len(_palette):
+            colors = _palette[:n_terms]
+        else:
+            # Generate evenly-spaced hues so no two neighbours are close
+            import colorsys
+            colors = []
+            for i in range(n_terms):
+                hue = (i / n_terms + 0.0) % 1.0
+                r, g, b = colorsys.hls_to_rgb(hue, 0.65, 0.55)
+                colors.append((r, g, b))
+        colors.append('#6b7280')  # grey for TOTAL
 
         y_axis_max = math.ceil(total_r2 / 10) * 10
 
@@ -726,6 +784,24 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 elif trans == 'Exponential':
                     cy = np.exp(cx)
                     cy = (cy - cy.min()) / (cy.max() - cy.min())
+                elif trans == 'Asinh':
+                    cy = np.arcsinh(cx * 4)
+                    cy = (cy - cy.min()) / (cy.max() - cy.min())
+                elif trans == 'Quartic':
+                    cy = cx ** 4
+                elif trans == 'Absolute':
+                    cy = np.abs(cx * 2 - 1)
+                elif trans in ('Tanh', 'Softsign', 'Arctan'):
+                    cy = np.tanh(cx * 4 - 2)
+                    cy = (cy - cy.min()) / (cy.max() - cy.min())
+                elif trans == 'HumpDecay':
+                    t = cx * 6 - 1
+                    cy = t / (1 + t ** 2)
+                    cy = (cy - cy.min()) / (cy.max() - cy.min())
+                elif trans == 'BellCurve':
+                    t = cx * 6 - 3
+                    cy = 1 / (1 + t ** 2)
+                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 else:
                     cy = cx
 
@@ -805,7 +881,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         rows = []
         for feat in X.columns:
             best_r2, best_tf = -1.0, None
-            for tf in TRANSFORM_TYPES:
+            for tf in self._transforms:
                 xt = apply_transform(X[feat].values, tf).reshape(-1, 1)
                 # Guard against constant columns after transform
                 if np.std(xt) == 0:
@@ -871,7 +947,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
             # Evaluate ALL remaining variables × ALL transforms
             best_f, best_feat, best_tf = -1.0, None, None
             for feat in remaining:
-                for tf in TRANSFORM_TYPES:
+                for tf in self._transforms:
                     xt = apply_transform(X[feat].values, tf).reshape(-1, 1)
                     if np.std(xt) == 0:
                         continue
@@ -1050,7 +1126,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 best_bic, best_tf, best_dbic = np.inf, None, 0
                 best_r2g, best_c, best_i = 0, None, None
 
-                for tf in TRANSFORM_TYPES:
+                for tf in self._transforms:
                     zt = apply_transform(z_raw, tf).reshape(-1, 1)
                     if np.std(zt) == 0:
                         continue
@@ -1122,7 +1198,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                     best_bic, best_tf, best_dbic = np.inf, None, 0
                     best_r2g, best_c, best_i = 0, None, None
 
-                    for tf in TRANSFORM_TYPES:
+                    for tf in self._transforms:
                         zt = apply_transform(z_raw, tf).reshape(-1, 1)
                         if np.std(zt) == 0:
                             continue
@@ -1198,7 +1274,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                 best_bic, best_tf, best_dbic = np.inf, None, 0
                 best_r2g, best_c, best_i = 0, None, None
 
-                for tf in TRANSFORM_TYPES:
+                for tf in self._transforms:
                     zt = apply_transform(z_raw, tf).reshape(-1, 1)
                     if np.std(zt) == 0:
                         continue
@@ -1542,7 +1618,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
 # ---------------------------------------------------------------------------
 
 def fit_prism(X, y, m=10, include_interactions=True, verbose=True,
-              dataset_name=None):
+              dataset_name=None, transform_library='standard'):
     """
     One-liner convenience function.
 
@@ -1560,13 +1636,15 @@ def fit_prism(X, y, m=10, include_interactions=True, verbose=True,
         Print progress?
     dataset_name : str or None
         Name shown on the PRISM chart.
+    transform_library : str
+        'standard' (7 transforms) or 'extended' (15 transforms).
 
     Returns
     -------
     PRISMRegressor
         Fitted model.
     """
-    mdl = PRISMRegressor(m=m)
+    mdl = PRISMRegressor(m=m, transform_library=transform_library)
     mdl.fit(X, y, include_interactions=include_interactions,
             verbose=verbose, dataset_name=dataset_name)
     return mdl
