@@ -573,22 +573,26 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         n_sel = len(feats)
         inc_r2_raw = [v * 100 for v in self.incremental_r2_[:n_sel]]
         transforms_raw = [self.transform_dict_[f] for f in feats]
+        coefs_raw = [self.coefficients_.get(f, 1.0) for f in feats]
 
         # Append interaction terms
         inter_names = []
         inter_r2 = []
         inter_transforms = []
+        inter_coefs = []
         if self.interactions_:
             for inter in self.interactions_:
                 inter_names.append(
                     f"{inter['feature_j']}\n× {inter['feature_k']}")
                 inter_r2.append(inter['r2_gain'] * 100)
                 inter_transforms.append(inter['transform'])
+                inter_coefs.append(inter.get('coefficient', 1.0))
 
         # Combine base variables + interactions, then sort by contribution
         all_names = feats + inter_names
         all_r2 = inc_r2_raw + inter_r2
         all_trans = transforms_raw + inter_transforms
+        all_coefs = coefs_raw + inter_coefs
         n_terms = len(all_names)
 
         order = sorted(range(n_terms), key=lambda k: all_r2[k],
@@ -596,6 +600,7 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
         names_sorted = [all_names[k] for k in order]
         r2_sorted = [all_r2[k] for k in order]
         trans_sorted = [all_trans[k] for k in order]
+        coefs_sorted = [all_coefs[k] for k in order]
         is_interaction = [k >= n_sel for k in order]
 
         total_r2 = self.r2_ * 100
@@ -765,13 +770,15 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                                   facecolor='black', alpha=0.18,
                                   edgecolor='none'))
 
-                # Transformation curve in data coords
+                # Transformation curve in data coords — shape reflects
+                # the actual coefficient sign so the mini-curve matches
+                # the fitted relationship direction.
+                coef_sign = np.sign(coefs_sorted[i]) if coefs_sorted[i] != 0 else 1.0
                 cx = np.linspace(0, 1, 100)
                 if trans == 'Linear':
                     cy = cx
                 elif trans == 'Inverse':
                     cy = 1 / (cx * 10 + 1)
-                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 elif trans == 'Cubic':
                     cy = cx ** 3
                 elif trans == 'Sqrt':
@@ -780,30 +787,32 @@ class PRISMRegressor(BaseEstimator, RegressorMixin):
                     cy = cx ** 2
                 elif trans in ('Log', 'Logarithmic'):
                     cy = np.log(cx * 10 + 1)
-                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 elif trans == 'Exponential':
                     cy = np.exp(cx)
-                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 elif trans == 'Asinh':
                     cy = np.arcsinh(cx * 4)
-                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 elif trans == 'Quartic':
                     cy = cx ** 4
                 elif trans == 'Absolute':
                     cy = np.abs(cx * 2 - 1)
                 elif trans in ('Tanh', 'Softsign', 'Arctan'):
                     cy = np.tanh(cx * 4 - 2)
-                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 elif trans == 'HumpDecay':
                     t = cx * 6 - 1
                     cy = t / (1 + t ** 2)
-                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 elif trans == 'BellCurve':
                     t = cx * 6 - 3
                     cy = 1 / (1 + t ** 2)
-                    cy = (cy - cy.min()) / (cy.max() - cy.min())
                 else:
                     cy = cx
+
+                # Apply coefficient sign then normalise to [0, 1]
+                cy = cy * coef_sign
+                cy_range = cy.max() - cy.min()
+                if cy_range > 0:
+                    cy = (cy - cy.min()) / cy_range
+                else:
+                    cy = np.full_like(cy, 0.5)
 
                 cx_s = bl + 0.15 * bar_width + cx * 0.7 * bar_width
                 cy_s = (block_bottom_data + 0.08 * block_height_data
